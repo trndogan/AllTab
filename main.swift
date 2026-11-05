@@ -641,6 +641,32 @@ enum Permissions {
     static var screenRecording: Bool { CGPreflightScreenCaptureAccess() }
     static var allGranted: Bool { accessibility && screenRecording }
 
+    /// macOS reads Screen Recording once per process, so a running app keeps seeing "denied" after the
+    /// user grants it. A fresh copy of ourselves (`--probe`) sees the live state.
+    static func probeScreenRecording(_ done: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+            p.arguments = ["--probe"]
+            var granted = false
+            if (try? p.run()) != nil { p.waitUntilExit(); granted = p.terminationStatus == 0 }
+            DispatchQueue.main.async { done(granted) }
+        }
+    }
+
+    /// Ground truth for Screen Recording: other apps' window titles are only readable when it is granted
+    /// (CGPreflightScreenCaptureAccess alone can disagree with the real state).
+    static var canReadOtherWindowTitles: Bool {
+        let me = getpid()
+        let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return infos.contains { w in
+            guard let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                  (w[kCGWindowLayer as String] as? Int) == 0,
+                  let name = w[kCGWindowName as String] as? String else { return false }
+            return !name.isEmpty
+        }
+    }
+
     /// One system dialog only: macOS adds AllTab to the list and offers "Open System Settings".
     /// When the user clicks it, System Settings tends to open behind other windows, so we
     /// watch for it for a few seconds and bring it to front once.
@@ -868,6 +894,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var status: NSStatusItem!
     var settings: SettingsWindow!
     let screenshot = ScreenshotTool()
+    private var launchedWithoutScreenRecording = false
     let awakeItem = NSMenuItem(title: L.t("Keep Awake", "Uyku Engelle"), action: #selector(toggleAwake), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -877,11 +904,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onScreenshotHotkey = { [weak self] in self?.screenshot.start() }
         if CommandLine.arguments.contains("--debug") { debugLog = true; installDebugHooks() }
 
-        // Ekran Kaydı izni sonradan verilirse macOS yeniden başlatma ister; bunu kendimiz yapalım.
-        // Yalnızca izin yokken 3 sn'de bir bakar, izin gelince durur.
+        // Screen Recording granted while we run: macOS wants a restart and its "Quit & Reopen" button is
+        // unreliable, so poll with a fresh process (only while the permission is missing) and restart ourselves.
         if !Permissions.screenRecording {
-            Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] t in
-                if Permissions.screenRecording { t.invalidate(); self?.relaunch() }
+            var probing = false
+            Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
+                guard !probing else { return }
+                probing = true
+                Permissions.probeScreenRecording { granted in
+                    probing = false
+                    dlog("probe screenRecording=\(granted)")
+                    if granted { t.invalidate(); self?.relaunch(afterGrant: true) }
+                }
             }
         }
 
@@ -896,7 +930,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.menu = menu
         syncUI()
 
-        dlog("launch accessibility=\(Permissions.accessibility) screenRecording=\(Permissions.screenRecording)")
+        launchedWithoutScreenRecording = !Permissions.screenRecording
+        dlog("launch accessibility=\(Permissions.accessibility) screenRecording=\(Permissions.screenRecording) canReadOtherWindowTitles=\(Permissions.canReadOtherWindowTitles) pid=\(getpid())")
+        // Relaunched by ourselves right after a grant: show the Settings window so the user sees both ✅.
+        if CommandLine.arguments.contains("--after-grant") { openSettings() }
         // Missing permissions: the app cannot work, so push the user through the flow instead of waiting silently.
         if !Permissions.allGranted {
             openSettings()
@@ -925,13 +962,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func relaunch() {
+    private var relaunching = false
+
+    /// Restart (used by the Settings button and after a permission grant).
+    @objc func relaunch() { relaunch(afterGrant: false) }
+
+    func relaunch(afterGrant: Bool) {
+        spawnRelauncher(afterGrant: afterGrant)
+        NSApp.terminate(nil)
+    }
+
+    /// macOS's own "Quit & Reopen" button quits us but does not reliably reopen us. If a normal quit
+    /// happens right after Screen Recording was granted, reopen ourselves.
+    func applicationWillTerminate(_ n: Notification) {
+        guard launchedWithoutScreenRecording, !relaunching else { return }
+        var granted = false
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+        p.arguments = ["--probe"]
+        if (try? p.run()) != nil { p.waitUntilExit(); granted = p.terminationStatus == 0 }
+        if granted { spawnRelauncher(afterGrant: true) }
+    }
+
+    private func spawnRelauncher(afterGrant: Bool) {
+        guard !relaunching else { return }
+        relaunching = true
         let path = Bundle.main.bundlePath
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "sleep 0.7; /usr/bin/open \"\(path)\""]
+        let args = afterGrant ? " --args --after-grant" : ""
+        p.arguments = ["-c", "sleep 0.7; /usr/bin/open \"\(path)\"\(args)"]
         try? p.run()
-        NSApp.terminate(nil)
     }
 
     /// `--debug` ile açılınca: dağıtık bildirimle panel/ayarlar kontrolü (yalnızca test için)
@@ -950,11 +1011,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "commit": s.holdOpen = false; s.commit()
             case "settings": self.openSettings()
             case "shot": self.screenshot.start()
+            case "grant": self.relaunch(afterGrant: true)
             default: break
             }
         }
     }
 }
+
+// `AllTab --probe`: print nothing, exit 0 when Screen Recording is granted (used to see the live state from a fresh process)
+if CommandLine.arguments.contains("--probe") { exit(CGPreflightScreenCaptureAccess() ? 0 : 1) }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
