@@ -4,13 +4,18 @@
 #   ./build.sh            → derle
 #   ./build.sh install    → derle ve /Applications/AllTab.app olarak kur, başlat
 #
-# İmza: SIGN_IDENTITY ortam değişkeni ya da "AllTab Local Signing" adlı yerel sertifika
-# (bkz. make-cert.sh). İkisi de yoksa ad-hoc imzalanır; ad-hoc imza her derlemede
-# değiştiği için macOS Erişilebilirlik / Ekran Kaydı izinlerini yeniden ister.
+# Signing identity, first match wins:
+#   SIGN_IDENTITY env var → "Developer ID Application" → "Apple Development" → "AllTab Local Signing" (make-cert.sh) → ad-hoc.
+# Ad-hoc signatures change on every build, so macOS drops Accessibility / Screen Recording permissions each time.
 set -e
 cd "$(dirname "$0")"
 APP="build/AllTab.app"
-IDENTITY="${SIGN_IDENTITY:-AllTab Local Signing}"
+IDS="$(security find-identity -v -p codesigning 2>/dev/null)"
+pick() { echo "$IDS" | grep -o "\"$1[^\"]*\"" | head -1 | tr -d '"'; }
+IDENTITY="${SIGN_IDENTITY:-}"
+[ -z "$IDENTITY" ] && IDENTITY="$(pick 'Developer ID Application')"
+[ -z "$IDENTITY" ] && IDENTITY="$(pick 'Apple Development')"
+[ -z "$IDENTITY" ] && IDENTITY="$(pick 'AllTab Local Signing')"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -20,14 +25,14 @@ swiftc -O -swift-version 5 -target arm64-apple-macos14.0 main.swift Screenshot.s
 cp Info.plist "$APP/Contents/Info.plist"
 [ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
-  codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
-  echo "İmza: $IDENTITY"
+if [ -n "$IDENTITY" ]; then
+  codesign --force --options runtime --sign "$IDENTITY" --timestamp=none "$APP"
+  echo "Signed with: $IDENTITY"
 else
   codesign --force --sign - "$APP"
-  echo "İmza: ad-hoc (sertifika yok, izinler her derlemede yenilenir; bkz. make-cert.sh)"
+  echo "Signed ad-hoc (no certificate found; permissions reset on every rebuild, see README)"
 fi
-echo "Hazır: $APP"
+echo "Built: $APP"
 
 if [ "$1" = "install" ]; then
   pkill -x AllTab 2>/dev/null || true
@@ -39,5 +44,5 @@ if [ "$1" = "install" ]; then
   "$LSREG" -u "$PWD/$APP" >/dev/null 2>&1 || true
   "$LSREG" -f /Applications/AllTab.app >/dev/null 2>&1 || true
   open /Applications/AllTab.app
-  echo "Kuruldu ve başlatıldı: /Applications/AllTab.app"
+  echo "Installed and launched: /Applications/AllTab.app"
 fi

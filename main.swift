@@ -641,35 +641,43 @@ enum Permissions {
     static var screenRecording: Bool { CGPreflightScreenCaptureAccess() }
     static var allGranted: Bool { accessibility && screenRecording }
 
-    /// System request (adds AllTab to the list in System Settings) + open the pane + bring System Settings to front.
+    /// One system dialog only: macOS adds AllTab to the list and offers "Open System Settings".
+    /// When the user clicks it, System Settings tends to open behind other windows, so we
+    /// watch for it for a few seconds and bring it to front once.
     static func openAccessibility() {
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-        open("Privacy_Accessibility")
+        raiseSystemSettingsWhenItAppears()
     }
 
     static func openScreenRecording() {
         if !screenRecording { CGRequestScreenCaptureAccess() }
-        open("Privacy_ScreenCapture")
+        raiseSystemSettingsWhenItAppears()
     }
 
-    /// Opens whatever is missing, Accessibility first.
+    /// Requests whatever is missing, Accessibility first.
     static func requestMissing() {
         if !accessibility { openAccessibility() }
         else if !screenRecording { openScreenRecording() }
     }
 
-    private static func open(_ pane: String) {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
-        // System Settings tends to open behind other windows; bring it to front once it is up.
-        for delay in [0.4, 1.2] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { bringSystemSettingsFront() }
+    private static var watcher: Timer?
+    private static func raiseSystemSettingsWhenItAppears() {
+        watcher?.invalidate()
+        let deadline = Date().addingTimeInterval(20)
+        var seenPid: pid_t = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.systempreferences").first?.processIdentifier ?? 0
+        watcher = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { t in
+            guard Date() < deadline else { t.invalidate(); return }
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.systempreferences").first else { return }
+            // Newly launched, or already running but got (re)activated by the dialog's button
+            if app.processIdentifier != seenPid || app.isActive {
+                seenPid = app.processIdentifier
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    SkyLight.bringToFront(pid: app.processIdentifier, window: 0)
+                    app.activate(options: [.activateIgnoringOtherApps])
+                }
+                t.invalidate()
+            }
         }
-    }
-
-    static func bringSystemSettingsFront() {
-        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.systempreferences").first else { return }
-        SkyLight.bringToFront(pid: app.processIdentifier, window: 0)
-        app.activate(options: [.activateIgnoringOtherApps])
     }
 }
 

@@ -24,7 +24,7 @@ Apple Silicon, macOS 14 or newer. Xcode Command Line Tools are enough.
 ```bash
 git clone https://github.com/trndogan/AllTab.git
 cd AllTab
-./make-cert.sh          # once: local signing certificate (keeps permissions across rebuilds)
+./make-cert.sh          # only without an Apple Developer certificate, see Signing below
 ./build.sh install      # build, install to /Applications, launch
 ```
 
@@ -33,9 +33,11 @@ On first launch the Settings window opens and asks for two permissions:
 1. **Accessibility** – required to capture the shortcut and bring windows to front. If AllTab is missing from the list, add `/Applications/AllTab.app` with **+** and turn it on. It starts working immediately, no restart needed.
 2. **Screen Recording** – for thumbnails and the screenshot tool. AllTab restarts itself after you grant it.
 
-### Why make-cert.sh?
+### Signing
 
-Apps built without a developer account are "ad-hoc" signed and the signature changes on every build. macOS ties Accessibility and Screen Recording permissions to the signature, so every rebuild would drop them. `make-cert.sh` creates a self-signed code-signing certificate ("AllTab Local Signing") in your login keychain, valid only on this Mac. `build.sh` signs with it when present, so permissions survive rebuilds. Without it, the build falls back to ad-hoc and says so.
+`build.sh` picks the first available identity: `SIGN_IDENTITY` env var, then **Developer ID Application**, then **Apple Development**, then the local certificate from `make-cert.sh`, otherwise ad-hoc.
+
+If you have an Apple Developer account, install your certificate once (Xcode → Settings → Accounts → Manage Certificates) and skip `make-cert.sh`. Without one, `make-cert.sh` creates a self-signed code-signing certificate in your login keychain; macOS asks for your login password once for the trust setting and once when codesign first uses the key (choose "Always Allow"). Either way the signature stays the same across rebuilds, which matters because macOS ties Accessibility and Screen Recording permissions to the signature: with an ad-hoc signature every rebuild would drop them.
 
 ## Usage
 
