@@ -639,11 +639,37 @@ enum LoginItem {
 enum Permissions {
     static var accessibility: Bool { AXIsProcessTrusted() }
     static var screenRecording: Bool { CGPreflightScreenCaptureAccess() }
+    static var allGranted: Bool { accessibility && screenRecording }
+
+    /// System request (adds AllTab to the list in System Settings) + open the pane + bring System Settings to front.
     static func openAccessibility() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+        _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+        open("Privacy_Accessibility")
     }
+
     static func openScreenRecording() {
-        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+        if !screenRecording { CGRequestScreenCaptureAccess() }
+        open("Privacy_ScreenCapture")
+    }
+
+    /// Opens whatever is missing, Accessibility first.
+    static func requestMissing() {
+        if !accessibility { openAccessibility() }
+        else if !screenRecording { openScreenRecording() }
+    }
+
+    private static func open(_ pane: String) {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
+        // System Settings tends to open behind other windows; bring it to front once it is up.
+        for delay in [0.4, 1.2] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { bringSystemSettingsFront() }
+        }
+    }
+
+    static func bringSystemSettingsFront() {
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.systempreferences").first else { return }
+        SkyLight.bringToFront(pid: app.processIdentifier, window: 0)
+        app.activate(options: [.activateIgnoringOtherApps])
     }
 }
 
@@ -862,8 +888,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.menu = menu
         syncUI()
 
-        // İzin eksikse yönlendirmek için ayarları aç
-        if !Permissions.accessibility || !Permissions.screenRecording { openSettings() }
+        // Missing permissions: the app cannot work, so push the user through the flow instead of waiting silently.
+        if !Permissions.allGranted {
+            openSettings()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { Permissions.requestMissing() }
+        }
     }
 
     @objc func openSettings() { settings.show() }

@@ -34,6 +34,10 @@ if [ "$1" = "install" ]; then
   sleep 0.5
   rm -rf /Applications/AllTab.app
   cp -R "$APP" /Applications/AllTab.app
+  # LaunchServices kaydını yenile: macOS'un "Çık ve Yeniden Aç" düğmesi uygulamayı bundle id ile bulur
+  LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+  "$LSREG" -u "$PWD/$APP" >/dev/null 2>&1 || true
+  "$LSREG" -f /Applications/AllTab.app >/dev/null 2>&1 || true
   open /Applications/AllTab.app
   echo "Kuruldu ve başlatıldı: /Applications/AllTab.app"
 fi
