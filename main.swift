@@ -35,6 +35,7 @@ enum SkyLight {
     static func bringToFront(pid: pid_t, window: CGWindowID) {
         var psn = ProcessSerialNumber()
         guard psnForPid?(pid, &psn) == noErr else { return }
+        _ = setFront?(&psn, window, 0x200)
         if let post = postEvent {
             var bytes = [UInt8](repeating: 0, count: 0xf8)
             bytes[0x04] = 0xF8
@@ -44,7 +45,6 @@ enum SkyLight {
             bytes[0x08] = 0x01; _ = post(&psn, bytes)
             bytes[0x08] = 0x02; _ = post(&psn, bytes)
         }
-        _ = setFront?(&psn, window, 0x200)
     }
 }
 
@@ -214,29 +214,40 @@ final class FocusTracker {
 // MARK: - Pencereyi öne getirme
 
 var debugLog = false
+/// --debug ile: ~/Library/Logs/WinTab.log dosyasına yazar
+func dlog(_ msg: String) {
+    guard debugLog else { return }
+    let df = DateFormatter(); df.dateFormat = "HH:mm:ss.SSS"
+    let line = "\(df.string(from: Date())) \(msg)\n"
+    let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/WinTab.log")
+    if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
+    else { try? line.write(to: url, atomically: true, encoding: .utf8) }
+}
 
-/// Pencereyi öne getirir. macOS 14+ arka plandaki bir uygulamanın başka uygulamayı öne
-/// almasını bazen reddettiği için WinTab bir anlığına kendisi aktif olup odağı resmi yolla
-/// (`activate(from:)`) devreder; SkyLight ve AX ile de doğru pencere seçilir.
+/// Pencereyi öne getirir: AltTab/yabai yöntemi (SkyLight "user generated" ön plan + AX raise).
+/// WinTab kendisi hiçbir zaman aktif olmaz; aksi halde penceresi olmadığı için macOS odağı
+/// bir önceki uygulamaya iade eder ("gidip geri dönme" hatası).
+/// Her geçişe sıra numarası: gecikmeli adımlar yalnızca hala en son geçiş buysa çalışır,
+/// yoksa hızlı art arda geçişlerde eski geçişin adımı yenisini geri alır.
+private var activationGeneration = 0
+
 func activate(_ w: WindowInfo) {
+    activationGeneration += 1
+    let gen = activationGeneration
     let app = w.app
     if app.isHidden { app.unhide() }
     let ax = w.ax ?? axWindows(of: w.pid)[w.id]
-    if debugLog { NSLog("activate %@ #%u onScreen=%d min=%d ax=%d", app.localizedName ?? "?", w.id, w.onScreen ? 1 : 0, w.minimized ? 1 : 0, ax == nil ? 0 : 1) }
-    if let ax { axRaise(ax) }
+    dlog("activate#\(gen) \(app.localizedName ?? "?") #\(w.id) onScreen=\(w.onScreen) min=\(w.minimized) ax=\(ax != nil) onde=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")")
     SkyLight.bringToFront(pid: w.pid, window: w.id)
-    NSApp.activate(ignoringOtherApps: true)
-    let ok = app.activate(from: .current, options: [.activateIgnoringOtherApps])
-    if !ok { app.activate(options: [.activateIgnoringOtherApps]) }
-    // Masaüstü değişimi / geç kalan uygulamalar için kısa aralıklarla yeniden dene
-    for delay in [0.25, 0.7] {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier != w.pid {
-                SkyLight.bringToFront(pid: w.pid, window: w.id)
-                app.activate(options: [.activateIgnoringOtherApps])
-            }
+    if let ax { axRaise(ax) }
+    // Başka masaüstündeki pencere: masaüstü değiştikten sonra bir kez daha öne al
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        guard gen == activationGeneration else { return }
+        let front = NSWorkspace.shared.frontmostApplication
+        dlog("activate#\(gen) +0.4s onde=\(front?.localizedName ?? "?")")
+        if front?.processIdentifier != w.pid {
+            SkyLight.bringToFront(pid: w.pid, window: w.id)
             if let el = axWindows(of: w.pid)[w.id] { axRaise(el) }
-            if debugLog, delay > 0.5 { NSLog("activate sonucu: ilk=%d onde=%@", ok ? 1 : 0, NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") }
         }
     }
 }
@@ -424,6 +435,7 @@ final class Switcher {
         guard visible, selected < windows.count else { hide(); return }
         let w = windows[selected]
         hide()
+        dlog("commit secili=\(selected) \(w.app.localizedName ?? "?") / \(w.title)")
         tracker.touch(w.id)
         activate(w)
     }
@@ -885,7 +897,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "next": s.step(1)
             case let cmd? where cmd.hasPrefix("select:"):
                 if let i = s.windows.firstIndex(where: { ($0.app.localizedName ?? "").lowercased().contains(cmd.dropFirst(7).lowercased()) }) { s.selected = i; s.grid.needsDisplay = true }
-                NSLog("liste: %@", s.windows.enumerated().map { "\($0.offset):\($0.element.app.localizedName ?? "?")[\($0.element.state ?? "")]\($0.offset == s.selected ? "*" : "")" }.joined(separator: " "))
+                dlog("liste: " + s.windows.enumerated().map { "\($0.offset):\($0.element.app.localizedName ?? "?")[\($0.element.state ?? "")]\($0.offset == s.selected ? "*" : "")" }.joined(separator: " "))
             case "cancel": s.holdOpen = false; s.cancel()
             case "commit": s.holdOpen = false; s.commit()
             case "settings": self.openSettings()
