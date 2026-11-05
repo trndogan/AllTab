@@ -896,6 +896,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.menu = menu
         syncUI()
 
+        dlog("launch accessibility=\(Permissions.accessibility) screenRecording=\(Permissions.screenRecording)")
         // Missing permissions: the app cannot work, so push the user through the flow instead of waiting silently.
         if !Permissions.allGranted {
             openSettings()
