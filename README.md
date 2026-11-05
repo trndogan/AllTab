@@ -31,7 +31,7 @@ cd AllTab
 On first launch the Settings window opens and asks for two permissions:
 
 1. **Accessibility** – required to capture the shortcut and bring windows to front. If AllTab is missing from the list, add `/Applications/AllTab.app` with **+** and turn it on. It starts working immediately, no restart needed.
-2. **Screen Recording** – for thumbnails and the screenshot tool. AllTab restarts itself after you grant it.
+2. **Screen Recording** – for thumbnails and the screenshot tool. macOS only reads this permission when an app starts, so AllTab watches for the grant (a fresh copy of itself checks every 2 seconds, only while the permission is missing) and restarts itself within a couple of seconds. You can ignore macOS's own "Quit & Reopen" dialog.
 
 ### Signing
 
