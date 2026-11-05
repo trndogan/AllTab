@@ -481,6 +481,9 @@ final class Switcher {
 
     /// Küçük resimler yalnızca panel açıkken ve eşzamansız çekilir, gelmeyenler simge olarak kalır.
     private func captureThumbs(_ gen: Int) {
+        // Without Screen Recording, SCShareableContent makes macOS show its "record screen and audio" dialog
+        // on every Cmd+Tab. Never touch ScreenCaptureKit unless the permission is already there.
+        guard Permissions.screenRecording else { return }
         let targets = windows
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, _ in
             guard let content else { return }
@@ -680,10 +683,21 @@ enum Permissions {
         raiseSystemSettingsWhenItAppears()
     }
 
-    /// Requests whatever is missing, Accessibility first.
-    static func requestMissing() {
-        if !accessibility { openAccessibility() }
-        else if !screenRecording { openScreenRecording() }
+    private static var askedAccessibility = false
+    private static var askedScreenRecording = false
+
+    /// Asks for one missing permission at a time, each at most once per run: Accessibility first,
+    /// Screen Recording after Accessibility is granted.
+    static func askNext() {
+        if !accessibility {
+            guard !askedAccessibility else { return }
+            askedAccessibility = true
+            openAccessibility()
+        } else if !screenRecording {
+            guard !askedScreenRecording else { return }
+            askedScreenRecording = true
+            openScreenRecording()
+        }
     }
 
     private static var watcher: Timer?
@@ -909,6 +923,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !Permissions.screenRecording {
             var probing = false
             Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
+                Permissions.askNext()   // moves on to Screen Recording once Accessibility is granted
                 guard !probing else { return }
                 probing = true
                 Permissions.probeScreenRecording { granted in
@@ -937,7 +952,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Missing permissions: the app cannot work, so push the user through the flow instead of waiting silently.
         if !Permissions.allGranted {
             openSettings()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { Permissions.requestMissing() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { Permissions.askNext() }
         }
     }
 
