@@ -1,4 +1,4 @@
-// WinTab – Ekran görüntüsü aracı (Lightshot tarzı)
+// AllTab – Screenshot tool (Lightshot-style)
 // Kısayol → ekran dondurulur → sürükleyerek alan seç → kırmızı çerçeve / ok / kalem ile işaretle
 // ⌘C kopyala, ⌘S kaydet, ⌘Z geri al, Enter kopyala, Esc iptal.
 
@@ -24,7 +24,7 @@ enum ShotHotkey {
     }
     /// Ayarlar penceresinde "Değiştir" basılınca true olur, sonraki tuş kombinasyonu kaydedilir.
     static var recording = false
-    static let changed = Notification.Name("wintab.shotHotkeyChanged")
+    static let changed = Notification.Name("alltab.shotHotkeyChanged")
 
     static let modMask: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
 
@@ -136,7 +136,7 @@ final class ShotView: NSView {
     private var live: Mark?
     private var selecting = false
     private let toolbar = NSVisualEffectView()
-    private let tools = NSSegmentedControl(labels: ["▭ Çerçeve", "→ Ok", "✎ Kalem"], trackingMode: .selectOne, target: nil, action: nil)
+    private let tools = NSSegmentedControl(labels: [L.t("▭ Rectangle", "▭ Çerçeve"), L.t("→ Arrow", "→ Ok"), L.t("✎ Pen", "✎ Kalem")], trackingMode: .selectOne, target: nil, action: nil)
     private let sizeLabel = NSTextField(labelWithString: "")
 
     override var isFlipped: Bool { true }
@@ -166,10 +166,10 @@ final class ShotView: NSView {
         toolbar.isHidden = true
         tools.selectedSegment = 0
         tools.target = self; tools.action = #selector(toolChanged)
-        let undo = NSButton(title: "↶ Geri Al", target: self, action: #selector(undo))
-        let copy = NSButton(title: "Kopyala ⌘C", target: self, action: #selector(copyAndClose))
-        let save = NSButton(title: "Kaydet ⌘S", target: self, action: #selector(saveAndClose))
-        let cancel = NSButton(title: "İptal", target: self, action: #selector(cancel))
+        let undo = NSButton(title: L.t("↶ Undo", "↶ Geri Al"), target: self, action: #selector(undo))
+        let copy = NSButton(title: L.t("Copy ⌘C", "Kopyala ⌘C"), target: self, action: #selector(copyAndClose))
+        let save = NSButton(title: L.t("Save ⌘S", "Kaydet ⌘S"), target: self, action: #selector(saveAndClose))
+        let cancel = NSButton(title: L.t("Cancel", "İptal"), target: self, action: #selector(cancel))
         copy.keyEquivalent = "\r"
         let stack = NSStackView(views: [tools, undo, NSBox.separatorBox(), copy, save, cancel])
         stack.orientation = .horizontal
@@ -361,7 +361,7 @@ final class ShotView: NSView {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        panel.nameFieldStringValue = "Ekran Görüntüsü \(df.string(from: Date())).png"
+        panel.nameFieldStringValue = L.t("Screenshot", "Ekran Görüntüsü") + " \(df.string(from: Date())).png"
         panel.canCreateDirectories = true
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { resp in

@@ -1,10 +1,10 @@
 #!/bin/zsh
-# "WinTab Yerel Imza" adlı, kod imzalama için kendinden imzalı yerel bir sertifika üretir ve
+# "AllTab Local Signing" adlı, kod imzalama için kendinden imzalı yerel bir sertifika üretir ve
 # giriş anahtar zincirine ekler. Böylece build.sh her derlemede aynı imzayı kullanır ve
 # macOS Erişilebilirlik / Ekran Kaydı izinleri yeniden derlemelerde korunur.
 # Apple geliştirici hesabı gerekmez. Sertifika yalnızca bu Mac'te geçerlidir.
 set -e
-NAME="WinTab Yerel Imza"
+NAME="AllTab Local Signing"
 KC="$HOME/Library/Keychains/login.keychain-db"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

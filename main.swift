@@ -1,12 +1,19 @@
-// WinTab – Windows tarzı Alt+Tab / Cmd+Tab pencere değiştirici (macOS)
-// Tek dosya, bağımlılık yok. Gizli, simge durumundaki ve başka masaüstündeki pencereler de listelenir.
-// Lisans: MIT
+// AllTab – Windows-style Alt+Tab / Cmd+Tab window switcher for macOS
+// Lists every window: hidden, minimized and other-Space ones too. No dependencies.
+// License: MIT
 
 import AppKit
 import ApplicationServices
 import ScreenCaptureKit
 import ServiceManagement
 import IOKit.pwr_mgt
+
+// MARK: - Localization (English by default, Turkish when the system language is Turkish)
+
+enum L {
+    static let isTurkish = Locale.preferredLanguages.first?.lowercased().hasPrefix("tr") == true
+    static func t(_ en: String, _ tr: String) -> String { isTurkish ? tr : en }
+}
 
 // MARK: - Özel (private) API'ler
 // AX pencere kimliği ve SkyLight ile pencereyi öne getirme. Yalnızca dlsym ile bağlanır,
@@ -91,9 +98,9 @@ struct WindowInfo {
 
     var label: String { title.isEmpty ? (app.localizedName ?? "") : title }
     var state: String? {
-        if minimized { return "simge durumunda" }
-        if app.isHidden { return "gizli" }
-        if !onScreen { return "başka masaüstü" }
+        if minimized { return L.t("minimized", "simge durumunda") }
+        if app.isHidden { return L.t("hidden", "gizli") }
+        if !onScreen { return L.t("other desktop", "başka masaüstü") }
         return nil
     }
 }
@@ -214,18 +221,18 @@ final class FocusTracker {
 // MARK: - Pencereyi öne getirme
 
 var debugLog = false
-/// --debug ile: ~/Library/Logs/WinTab.log dosyasına yazar
+/// With --debug: appends to ~/Library/Logs/AllTab.log
 func dlog(_ msg: String) {
     guard debugLog else { return }
     let df = DateFormatter(); df.dateFormat = "HH:mm:ss.SSS"
     let line = "\(df.string(from: Date())) \(msg)\n"
-    let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/WinTab.log")
+    let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/AllTab.log")
     if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line.data(using: .utf8)!); try? h.close() }
     else { try? line.write(to: url, atomically: true, encoding: .utf8) }
 }
 
 /// Pencereyi öne getirir: AltTab/yabai yöntemi (SkyLight "user generated" ön plan + AX raise).
-/// WinTab kendisi hiçbir zaman aktif olmaz; aksi halde penceresi olmadığı için macOS odağı
+/// AllTab never activates itself; with no windows of its own macOS would hand focus
 /// bir önceki uygulamaya iade eder ("gidip geri dönme" hatası).
 /// Her geçişe sıra numarası: gecikmeli adımlar yalnızca hala en son geçiş buysa çalışır,
 /// yoksa hızlı art arda geçişlerde eski geçişin adımı yenisini geri alır.
@@ -609,7 +616,7 @@ enum KeepAwake {
         if enabled, assertion == 0 {
             IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
                                         IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                        "WinTab: uyku engelleme açık" as CFString, &assertion)
+                                        "AllTab: keep awake" as CFString, &assertion)
         } else if !enabled, assertion != 0 {
             IOPMAssertionRelease(assertion)
             assertion = 0
@@ -624,7 +631,7 @@ enum LoginItem {
         get { SMAppService.mainApp.status == .enabled }
         set {
             do { if newValue { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
-            catch { NSLog("WinTab girişte başlat ayarı değiştirilemedi: \(error.localizedDescription)") }
+            catch { NSLog("AllTab launch-at-login change failed: \(error.localizedDescription)") }
         }
     }
 }
@@ -645,14 +652,14 @@ enum Permissions {
 final class SettingsWindow: NSWindowController {
     private let axStatus = NSTextField(labelWithString: "")
     private let scStatus = NSTextField(labelWithString: "")
-    private let axButton = NSButton(title: "Ayarı Aç", target: nil, action: nil)
-    private let scButton = NSButton(title: "Ayarı Aç", target: nil, action: nil)
+    private let axButton = NSButton(title: L.t("Open Settings", "Ayarı Aç"), target: nil, action: nil)
+    private let scButton = NSButton(title: L.t("Open Settings", "Ayarı Aç"), target: nil, action: nil)
     private let hotkeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let loginCheck = NSButton(checkboxWithTitle: "Girişte otomatik başlat", target: nil, action: nil)
-    private let awakeCheck = NSButton(checkboxWithTitle: "Uyku engelle (ekran uyumasın, kapak kapanınca uyur)", target: nil, action: nil)
-    private let shotCheck = NSButton(checkboxWithTitle: "Ekran görüntüsü aracını kullan", target: nil, action: nil)
+    private let loginCheck = NSButton(checkboxWithTitle: L.t("Launch at login", "Girişte otomatik başlat"), target: nil, action: nil)
+    private let awakeCheck = NSButton(checkboxWithTitle: L.t("Keep awake (display never sleeps, lid close still sleeps)", "Uyku engelle (ekran uyumasın, kapak kapanınca uyur)"), target: nil, action: nil)
+    private let shotCheck = NSButton(checkboxWithTitle: L.t("Enable screenshot tool", "Ekran görüntüsü aracını kullan"), target: nil, action: nil)
     private let shotKeyLabel = NSTextField(labelWithString: "")
-    private let shotKeyButton = NSButton(title: "Değiştir", target: nil, action: nil)
+    private let shotKeyButton = NSButton(title: L.t("Change", "Değiştir"), target: nil, action: nil)
     private var refresh: Timer?
     weak var app: AppDelegate?
 
@@ -660,7 +667,7 @@ final class SettingsWindow: NSWindowController {
         self.app = app
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 10),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        w.title = "WinTab Ayarları"
+        w.title = L.t("AllTab Settings", "AllTab Ayarları")
         w.isReleasedWhenClosed = false
         super.init(window: w)
         build()
@@ -702,37 +709,40 @@ final class SettingsWindow: NSWindowController {
         loginCheck.target = self; loginCheck.action = #selector(loginChanged)
         awakeCheck.target = self; awakeCheck.action = #selector(awakeChanged)
 
-        let hkRow = NSStackView(views: [NSTextField(labelWithString: "Pencere değiştir:"), hotkeyPopup])
+        let hkRow = NSStackView(views: [NSTextField(labelWithString: L.t("Switch windows:", "Pencere değiştir:")), hotkeyPopup])
         hkRow.orientation = .horizontal; hkRow.spacing = 8
 
         shotCheck.target = self; shotCheck.action = #selector(shotChanged)
         shotKeyButton.target = self; shotKeyButton.action = #selector(recordShotKey)
         shotKeyLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
-        let shotRow = NSStackView(views: [NSTextField(labelWithString: "Kısayol:"), shotKeyLabel, shotKeyButton])
+        let shotRow = NSStackView(views: [NSTextField(labelWithString: L.t("Shortcut:", "Kısayol:")), shotKeyLabel, shotKeyButton])
         shotRow.orientation = .horizontal; shotRow.spacing = 8
         NotificationCenter.default.addObserver(forName: ShotHotkey.changed, object: nil, queue: .main) { [weak self] _ in self?.loadShot() }
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [note("WinTab \(version)"), spacer,
-                                         NSButton(title: "Yeniden Başlat", target: self, action: #selector(restart)),
-                                         NSButton(title: "Çıkış", target: NSApp, action: #selector(NSApplication.terminate(_:)))])
+        let footer = NSStackView(views: [note("AllTab \(version)"), spacer,
+                                         NSButton(title: L.t("Restart", "Yeniden Başlat"), target: self, action: #selector(restart)),
+                                         NSButton(title: L.t("Quit", "Çıkış"), target: NSApp, action: #selector(NSApplication.terminate(_:)))])
         footer.orientation = .horizontal; footer.spacing = 8
 
         let rows: [NSView] = [
-            section("Kısayol"), hkRow,
-            note("Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları ve fare de çalışır. Bırakınca seçili pencereye geçer, Esc iptal."),
+            section(L.t("Shortcut", "Kısayol")), hkRow,
+            note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys and the mouse work too. Release to switch, Esc cancels.",
+                     "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları ve fare de çalışır. Bırakınca seçili pencereye geçer, Esc iptal.")),
             separator(),
-            section("İzinler"),
-            permRow(axStatus, "Erişilebilirlik", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu.", axButton, #selector(openAX)),
-            permRow(scStatus, "Ekran Kaydı", "Pencerelerin küçük resimleri için. Verilmezse simge gösterilir.", scButton, #selector(openSC)),
-            note("Ayar sayfasında listede WinTab yoksa + ile /Applications/WinTab.app'ı ekle ve anahtarı aç. İzin verildiğinde uygulama gerekirse kendini yeniden başlatır."),
+            section(L.t("Permissions", "İzinler")),
+            permRow(axStatus, L.t("Accessibility", "Erişilebilirlik"), L.t("Required to capture the shortcut and bring windows to front.", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu."), axButton, #selector(openAX)),
+            permRow(scStatus, L.t("Screen Recording", "Ekran Kaydı"), L.t("For window thumbnails and the screenshot tool. Without it, app icons are shown.", "Pencerelerin küçük resimleri ve ekran görüntüsü için. Verilmezse simge gösterilir."), scButton, #selector(openSC)),
+            note(L.t("If AllTab is missing from the list, add /Applications/AllTab.app with + and turn it on. AllTab restarts itself when needed after a permission is granted.",
+                     "Ayar sayfasında listede AllTab yoksa + ile /Applications/AllTab.app'ı ekle ve anahtarı aç. İzin verildiğinde uygulama gerekirse kendini yeniden başlatır.")),
             separator(),
-            section("Ekran Görüntüsü"), shotCheck, shotRow,
-            note("Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal."),
+            section(L.t("Screenshot", "Ekran Görüntüsü")), shotCheck, shotRow,
+            note(L.t("Press the shortcut to freeze the screen, drag to select an area, mark it with a red rectangle / arrow / pen. ⌘C copies (then ⌘V anywhere), ⌘S saves, ⌘Z undoes, Esc cancels.",
+                     "Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal.")),
             separator(),
-            section("Genel"), loginCheck, awakeCheck,
+            section(L.t("General", "Genel")), loginCheck, awakeCheck,
             separator(),
             footer,
         ]
@@ -782,8 +792,8 @@ final class SettingsWindow: NSWindowController {
 
     private func loadShot() {
         shotCheck.state = ShotHotkey.enabled ? .on : .off
-        shotKeyLabel.stringValue = ShotHotkey.recording ? "tuşlara bas…" : ShotHotkey.display
-        shotKeyButton.title = ShotHotkey.recording ? "İptal" : "Değiştir"
+        shotKeyLabel.stringValue = ShotHotkey.recording ? L.t("press keys…", "tuşlara bas…") : ShotHotkey.display
+        shotKeyButton.title = ShotHotkey.recording ? L.t("Cancel", "İptal") : L.t("Change", "Değiştir")
         shotKeyButton.isEnabled = ShotHotkey.enabled
     }
 
@@ -797,8 +807,8 @@ final class SettingsWindow: NSWindowController {
         let ax = Permissions.accessibility, sc = Permissions.screenRecording
         axStatus.stringValue = ax ? "✅" : "⚠️"
         scStatus.stringValue = sc ? "✅" : "⚠️"
-        axButton.title = ax ? "Verildi" : "Ayarı Aç"
-        scButton.title = sc ? "Verildi" : "Ayarı Aç"
+        axButton.title = ax ? L.t("Granted", "Verildi") : L.t("Open Settings", "Ayarı Aç")
+        scButton.title = sc ? L.t("Granted", "Verildi") : L.t("Open Settings", "Ayarı Aç")
         axButton.isEnabled = !ax
         scButton.isEnabled = !sc
     }
@@ -824,7 +834,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var status: NSStatusItem!
     var settings: SettingsWindow!
     let screenshot = ScreenshotTool()
-    let awakeItem = NSMenuItem(title: "Uyku Engelle", action: #selector(toggleAwake), keyEquivalent: "")
+    let awakeItem = NSMenuItem(title: L.t("Keep Awake", "Uyku Engelle"), action: #selector(toggleAwake), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ n: Notification) {
         switcher = Switcher()
@@ -844,11 +854,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         KeepAwake.apply()
         let menu = NSMenu()
-        menu.addItem(withTitle: "Ayarlar…", action: #selector(openSettings), keyEquivalent: ",")
-        menu.addItem(withTitle: "Ekran Görüntüsü Al", action: #selector(takeScreenshot), keyEquivalent: "")
+        menu.addItem(withTitle: L.t("Settings…", "Ayarlar…"), action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(withTitle: L.t("Take Screenshot", "Ekran Görüntüsü Al"), action: #selector(takeScreenshot), keyEquivalent: "")
         menu.addItem(awakeItem)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Çıkış", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(withTitle: L.t("Quit", "Çıkış"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         status.menu = menu
         syncUI()
 
@@ -868,7 +878,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func syncUI() {
         awakeItem.state = KeepAwake.enabled ? .on : .off
         let name = KeepAwake.enabled ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle"
-        if let img = NSImage(systemSymbolName: name, accessibilityDescription: "WinTab") {
+        if let img = NSImage(systemSymbolName: name, accessibilityDescription: "AllTab") {
             img.isTemplate = true
             status.button?.image = img
             status.button?.title = ""
@@ -889,7 +899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `--debug` ile açılınca: dağıtık bildirimle panel/ayarlar kontrolü (yalnızca test için)
     private func installDebugHooks() {
         DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.seo.wintab.debug"), object: nil, queue: .main) { [weak self] n in
+            forName: Notification.Name("com.turandogan.alltab.debug"), object: nil, queue: .main) { [weak self] n in
             guard let self, let s = self.switcher else { return }
             switch n.object as? String {
             case "show": s.holdOpen = true; s.show()

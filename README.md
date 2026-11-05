@@ -1,77 +1,80 @@
-# WinTab
+# AllTab
 
-macOS için Windows tarzı **Alt+Tab** (varsayılan **Cmd+Tab**) pencere değiştirici, yanında Lightshot tarzı bir **ekran görüntüsü aracı**. İki Swift dosyası, bağımlılık yok, ~300 KB, Dock'ta görünmez, arka planda hiçbir şey çalıştırmaz.
+Windows-style **Alt+Tab** (default **Cmd+Tab**) window switcher for macOS that shows **all** windows, including hidden, minimized and other-Space ones, with live thumbnails. Comes with a Lightshot-style screenshot tool and a keep-awake toggle. Two Swift files, no dependencies, ~300 KB, no Dock icon, nothing running in the background.
 
-AltTab ve DockDoor gibi araçlar ağır geldiği için yazıldı. Amaç tek: Windows'taki gibi tüm pencereleri (gizli, simge durumunda ve başka masaüstündekiler dahil) küçük resimleriyle görüp aralarında geçmek. Premium yok, güncelleme servisi yok, telemetri yok.
+Built because AltTab and DockDoor felt heavy and kept pushing premium features. No premium, no updater, no telemetry.
 
-## Özellikler
+## Features
 
-- **Cmd+Tab / Alt+Tab / Ctrl+Tab** seçilebilir. Cmd+Tab seçilince macOS'un kendi uygulama değiştiricisi devreye girmez.
-- Tuşu basılı tutup **Tab** ile ileri, **Shift+Tab** ile geri, ok tuşları ve fare ile seçim. Tuşu bırakınca geçer, **Esc** iptal.
-- **Pencere bazlı** liste (uygulama bazlı değil), son kullanılan önce. Kısa Cmd+Tab bir önceki pencereye döner.
-- **Gizli (Cmd+H)**, **simge durumundaki** ve **başka masaüstündeki** pencereler de listede, etiketleriyle. Seçince açar, büyütür, masaüstünü değiştirir.
-- Küçük resimler yalnızca panel açıkken çekilir (ScreenCaptureKit). Ekran Kaydı izni yoksa uygulama simgesi gösterilir.
-- Tam ekran uygulamaların üstünde de açılır, fare hangi ekrandaysa orada.
-- Ayarlar penceresi: kısayol, izin durumu ve tek tıkla ayar sayfası, girişte başlat, **uyku engelle** (Amphetamine'in "Indefinitely" modu gibi: ekran uyumaz, kapak kapanınca uyur).
-- **Ekran görüntüsü** (varsayılan **⌘Ğ**, Türkçe olmayan klavyede ⌘[, ayarlardan değiştirilir, istenirse kapatılır): ekran dondurulur, sürükleyerek alan seçilir, kırmızı **çerçeve / ok / kalem** ile işaretlenir. **⌘C** panoya kopyalar (sonra istediğin yere ⌘V), **⌘S** kaydet penceresi açar, **⌘Z** geri alır, **Esc** iptal. Çıktı ekranın gerçek piksel çözünürlüğünde PNG.
+- **Cmd+Tab / Alt+Tab / Ctrl+Tab** selectable. With Cmd+Tab the native macOS app switcher never appears.
+- Hold the modifier, **Tab** forward, **Shift+Tab** back, arrow keys and mouse work too. Release to switch, **Esc** to cancel.
+- **Per-window** list (not per-app), most recently used first. A quick Cmd+Tab returns to the previous window.
+- **Hidden (Cmd+H)**, **minimized** and **other-desktop** windows are listed with a badge. Selecting one unhides, restores or switches Space as needed.
+- Thumbnails are captured only while the panel is open (ScreenCaptureKit). Without Screen Recording permission, app icons are shown instead.
+- Opens on top of full-screen apps, on the screen where the mouse is.
+- **Screenshot tool** (default **⌘Ğ** on Turkish keyboards, ⌘[ elsewhere; change it in Settings or turn it off): freeze the screen, drag to select, mark with a red **rectangle / arrow / pen**. **⌘C** copies (then ⌘V anywhere), **⌘S** saves, **⌘Z** undoes, **Esc** cancels. Output is a PNG at native pixel resolution.
+- **Keep awake**: like Amphetamine's "Indefinitely" mode, the display never sleeps, closing the lid still sleeps.
+- Settings window with permission status and one-click links to the right System Settings pane. Launch at login via `SMAppService`.
+- UI in English, or Turkish when the system language is Turkish.
 
-## Kurulum
+## Install
 
-Apple Silicon ve macOS 14+ gerekir. Xcode Command Line Tools yeterli.
+Apple Silicon, macOS 14 or newer. Xcode Command Line Tools are enough.
 
 ```bash
-git clone https://github.com/trndogan/WinTab.git
-cd WinTab
-./make-cert.sh          # bir kez: yerel imza sertifikası (izinlerin korunması için)
-./build.sh install      # derle, /Applications'a kur, başlat
+git clone https://github.com/trndogan/AllTab.git
+cd AllTab
+./make-cert.sh          # once: local signing certificate (keeps permissions across rebuilds)
+./build.sh install      # build, install to /Applications, launch
 ```
 
-İlk açılışta ayarlar penceresi gelir ve iki izni ister:
+On first launch the Settings window opens and asks for two permissions:
 
-1. **Erişilebilirlik** – kısayolu yakalamak ve pencereleri öne getirmek için zorunlu. Sayfada listede WinTab yoksa **+** ile `/Applications/WinTab.app`'ı ekle ve anahtarı aç. İzin verilir verilmez çalışır, yeniden başlatmak gerekmez.
-2. **Ekran Kaydı** – küçük resimler için. Verilince uygulama kendini yeniden başlatır.
+1. **Accessibility** – required to capture the shortcut and bring windows to front. If AllTab is missing from the list, add `/Applications/AllTab.app` with **+** and turn it on. It starts working immediately, no restart needed.
+2. **Screen Recording** – for thumbnails and the screenshot tool. AllTab restarts itself after you grant it.
 
-### Neden make-cert.sh?
+### Why make-cert.sh?
 
-Geliştirici hesabı olmadan derlenen uygulamalar "ad-hoc" imzalanır ve bu imza her derlemede değişir. macOS, Erişilebilirlik ve Ekran Kaydı izinlerini imzaya bağladığı için her derlemeden sonra izinler düşer. `make-cert.sh`, yalnızca bu Mac'te geçerli, kendinden imzalı bir kod imzalama sertifikası üretip giriş anahtar zincirine ekler. `build.sh` bu sertifikayı bulursa onunla imzalar, izinler korunur. Sertifika yoksa ad-hoc'a düşer ve bunu söyler.
+Apps built without a developer account are "ad-hoc" signed and the signature changes on every build. macOS ties Accessibility and Screen Recording permissions to the signature, so every rebuild would drop them. `make-cert.sh` creates a self-signed code-signing certificate ("AllTab Local Signing") in your login keychain, valid only on this Mac. `build.sh` signs with it when present, so permissions survive rebuilds. Without it, the build falls back to ad-hoc and says so.
 
-## Kullanım
+## Usage
 
-| Tuş | İşlev |
+| Keys | Action |
 |---|---|
-| Cmd+Tab (basılı tut) | Paneli aç, bir sonrakine geç |
-| Cmd+Shift+Tab | Bir öncekine |
-| ← → ↑ ↓ | Izgarada dolaş |
-| Fare | Üstüne gel seç, tıkla geç |
-| Cmd bırak / Enter | Seçili pencereye geç |
-| Esc | İptal |
+| Cmd+Tab (hold) | Open the switcher, move to the next window |
+| Cmd+Shift+Tab | Previous window |
+| ← → ↑ ↓ | Move around the grid |
+| Mouse | Hover to select, click to switch |
+| Release Cmd / Enter | Switch to the selected window |
+| Esc | Cancel |
 
-Ekran görüntüsü aracında: **1 / 2 / 3** çerçeve, ok, kalem; seçim içinde sürükle işaretler, dışında sürükle yeni alan seçer; **Enter** veya **⌘C** kopyalar, **⌘S** kaydeder, **⌘Z** geri alır, **Esc** iptal.
+Screenshot tool: **1 / 2 / 3** choose rectangle, arrow, pen; drag inside the selection to mark, drag outside to select a new area; **Enter** or **⌘C** copies, **⌘S** saves, **⌘Z** undoes, **Esc** cancels.
 
-Menü çubuğundaki simgeden **Ayarlar…**, **Ekran Görüntüsü Al**, **Uyku Engelle** ve **Çıkış**.
+Menu bar icon: **Settings…**, **Take Screenshot**, **Keep Awake**, **Quit**.
 
-## Nasıl çalışıyor
+## How it works
 
-- Pencere listesi `CGWindowListCopyWindowInfo` ile alınır, yalnızca normal uygulamaların 100×50'den büyük, katman 0 pencereleri tutulur. Ekran dışındakiler için Accessibility ile simge durumu ve başlık okunur, başlıksız yardımcı pencereler elenir.
-- Kısayol `CGEvent` tap ile yakalanır (Erişilebilirlik izni). Panel açıkken tuşlar yutulur, modifier bırakılınca seçili pencereye geçilir.
-- Pencereyi öne getirmek için `AXRaise` + SkyLight `_SLPSSetFrontProcessWithOptions` (AltTab/yabai'nin kullandığı yöntem). Başka masaüstündeki pencereler için masaüstü değiştikten sonra AX ile tekrar öne alınır.
-- Küçük resimler `SCScreenshotManager` ile pencere başına, panel açılınca eşzamansız çekilir; panel kapanınca bekleyen sonuçlar atılır.
-- Son kullanım sırası `NSWorkspace` aktivasyon bildirimi + aktif uygulamaya `AXObserver` ile takip edilir, zamanlayıcı yok.
+- Windows come from `CGWindowListCopyWindowInfo`, keeping only layer-0 windows of regular apps larger than 100×50. Off-screen windows get their minimized state and title via Accessibility; untitled helper windows are dropped.
+- The shortcut is captured with a `CGEvent` tap (Accessibility permission). While the panel is open, keys are swallowed; releasing the modifier switches.
+- Windows are brought to front with `AXRaise` plus SkyLight `_SLPSSetFrontProcessWithOptions`, the same approach AltTab and yabai use. AllTab never activates itself, otherwise macOS would hand focus back to the previous app. For windows on another Space the raise is repeated once after the Space switch, guarded by a generation counter so rapid successive switches never undo each other.
+- Thumbnails are taken per window with `SCScreenshotManager`, asynchronously, only while the panel is open; results arriving after it closes are discarded.
+- MRU order is tracked through `NSWorkspace` activation notifications and an `AXObserver` on the active app. No timers.
+- Debugging: `open -a AllTab --args --debug` logs every switch to `~/Library/Logs/AllTab.log`.
 
-## Dosyalar
+## Files
 
-- `main.swift` – pencere değiştirici, ayarlar, menü
-- `Screenshot.swift` – ekran görüntüsü aracı
-- `build.sh` – derleme ve kurulum
-- `make-cert.sh` – yerel imza sertifikası
-- `Info.plist`, `AppIcon.icns` – paket bilgileri ve simge (`assets/make-icon.swift` ile üretildi)
+- `main.swift` – switcher, settings, menu
+- `Screenshot.swift` – screenshot tool
+- `build.sh` – build and install
+- `make-cert.sh` – local signing certificate
+- `Info.plist`, `AppIcon.icns` – bundle info and icon (generated by `assets/make-icon.swift`)
 
-## Lisans
+## License
 
 MIT
 
 ---
 
-### English
+### Türkçe
 
-Windows-style Alt+Tab (default Cmd+Tab) window switcher for macOS in two Swift files, plus a Lightshot-style screenshot tool (freeze screen, drag to select, red rectangle/arrow/pen, ⌘C copies, ⌘S saves). Lists every window including hidden, minimized and other-Space ones with live thumbnails, switches on key release, no dependencies, no background work, no premium. Build with `./make-cert.sh` (once) and `./build.sh install`, then grant Accessibility and Screen Recording from the settings window it opens. Apple Silicon, macOS 14+.
+macOS için Windows tarzı Alt+Tab (varsayılan Cmd+Tab) pencere değiştirici. Gizli, simge durumundaki ve başka masaüstündeki pencereler dahil **tüm** pencereleri küçük resimleriyle listeler, tuşu bırakınca geçer. Yanında Lightshot tarzı ekran görüntüsü aracı (⌘Ğ, alan seç, kırmızı çerçeve/ok/kalem, ⌘C kopyala, ⌘S kaydet) ve uyku engelleme var. Kurulum: `./make-cert.sh` (bir kez) ve `./build.sh install`, ardından açılan ayarlar penceresinden Erişilebilirlik ve Ekran Kaydı izinlerini ver. Sistem dili Türkçeyse arayüz Türkçedir.
