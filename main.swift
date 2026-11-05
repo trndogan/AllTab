@@ -735,6 +735,10 @@ final class SettingsWindow: NSWindowController {
     private let shotKeyLabel = NSTextField(labelWithString: "")
     private let shotKeyButton = NSButton(title: L.t("Change", "Değiştir"), target: nil, action: nil)
     private var refresh: Timer?
+    /// True while the user is going through the permission setup with this window open.
+    var assisting = false
+    private var lastAccessibility = false
+    private var systemSettingsObserver: NSObjectProtocol?
     weak var app: AppDelegate?
 
     init(app: AppDelegate) {
@@ -842,11 +846,28 @@ final class SettingsWindow: NSWindowController {
         window?.contentView = content
     }
 
-    func show() {
-        load()
-        window?.center()
+    func bringToFront() {
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func show() {
+        assisting = !Permissions.allGranted
+        lastAccessibility = Permissions.accessibility
+        load()
+        window?.center()
+        bringToFront()
+        // This is a menu bar app: when System Settings is closed macOS hands focus to the previous app and
+        // our window ends up buried behind it. While the user is setting up permissions, bring it back.
+        if systemSettingsObserver == nil {
+            systemSettingsObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didDeactivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+                guard let self, self.assisting, self.window?.isVisible == true,
+                      let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      app.bundleIdentifier == "com.apple.systempreferences" else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.bringToFront() }
+            }
+        }
         refresh?.invalidate()
         // Yalnızca pencere açıkken izin durumunu tazele
         refresh = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
@@ -879,6 +900,9 @@ final class SettingsWindow: NSWindowController {
 
     private func loadPermissions() {
         let ax = Permissions.accessibility, sc = Permissions.screenRecording
+        if assisting && ax && !lastAccessibility { bringToFront() }   // show the new ✅
+        lastAccessibility = ax
+        if ax && sc { assisting = false }
         axStatus.stringValue = ax ? "✅" : "⚠️"
         scStatus.stringValue = sc ? "✅" : "⚠️"
         axButton.title = ax ? L.t("Granted", "Verildi") : L.t("Open Settings", "Ayarı Aç")
@@ -1027,6 +1051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "settings": self.openSettings()
             case "shot": self.screenshot.start()
             case "grant": self.relaunch(afterGrant: true)
+            case "assist": self.settings.assisting = true
             default: break
             }
         }
