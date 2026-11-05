@@ -73,6 +73,8 @@ func axRaise(_ el: AXUIElement) {
         AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
     }
     AXUIElementPerformAction(el, kAXRaiseAction as CFString)
+    AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, kCFBooleanTrue)
+    AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 }
 
 // MARK: - Pencere modeli
@@ -211,17 +213,30 @@ final class FocusTracker {
 
 // MARK: - Pencereyi öne getirme
 
+var debugLog = false
+
+/// Pencereyi öne getirir. macOS 14+ arka plandaki bir uygulamanın başka uygulamayı öne
+/// almasını bazen reddettiği için WinTab bir anlığına kendisi aktif olup odağı resmi yolla
+/// (`activate(from:)`) devreder; SkyLight ve AX ile de doğru pencere seçilir.
 func activate(_ w: WindowInfo) {
     let app = w.app
     if app.isHidden { app.unhide() }
     let ax = w.ax ?? axWindows(of: w.pid)[w.id]
+    if debugLog { NSLog("activate %@ #%u onScreen=%d min=%d ax=%d", app.localizedName ?? "?", w.id, w.onScreen ? 1 : 0, w.minimized ? 1 : 0, ax == nil ? 0 : 1) }
     if let ax { axRaise(ax) }
     SkyLight.bringToFront(pid: w.pid, window: w.id)
-    app.activate(options: [.activateIgnoringOtherApps])
-    if ax == nil {
-        // Başka masaüstündeki pencere: masaüstü değiştikten sonra AX ile öne al
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+    NSApp.activate(ignoringOtherApps: true)
+    let ok = app.activate(from: .current, options: [.activateIgnoringOtherApps])
+    if !ok { app.activate(options: [.activateIgnoringOtherApps]) }
+    // Masaüstü değişimi / geç kalan uygulamalar için kısa aralıklarla yeniden dene
+    for delay in [0.25, 0.7] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier != w.pid {
+                SkyLight.bringToFront(pid: w.pid, window: w.id)
+                app.activate(options: [.activateIgnoringOtherApps])
+            }
             if let el = axWindows(of: w.pid)[w.id] { axRaise(el) }
+            if debugLog, delay > 0.5 { NSLog("activate sonucu: ilk=%d onde=%@", ok ? 1 : 0, NSWorkspace.shared.frontmostApplication?.localizedName ?? "?") }
         }
     }
 }
@@ -492,6 +507,8 @@ enum Hotkey: String, CaseIterable {
 
 // MARK: - Klavye yakalama (event tap)
 
+var onScreenshotHotkey: (() -> Void)?
+
 final class HotkeyTap {
     let switcher: Switcher
     private var tap: CFMachPort?
@@ -533,6 +550,11 @@ final class HotkeyTap {
         }
         guard type == .keyDown else { return false }
         let key = event.getIntegerValueField(.keyboardEventKeycode)
+        if ShotHotkey.recording { ShotHotkey.record(key, flags); return true }
+        if ShotHotkey.enabled, !s.visible, ShotHotkey.matches(key, flags) {
+            DispatchQueue.main.async { onScreenshotHotkey?() }
+            return true
+        }
         let allMods: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl]
         let others = allMods.subtracting(hk.flag)
         if key == 48, mod, flags.intersection(others).isEmpty {          // Tab
@@ -616,6 +638,9 @@ final class SettingsWindow: NSWindowController {
     private let hotkeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let loginCheck = NSButton(checkboxWithTitle: "Girişte otomatik başlat", target: nil, action: nil)
     private let awakeCheck = NSButton(checkboxWithTitle: "Uyku engelle (ekran uyumasın, kapak kapanınca uyur)", target: nil, action: nil)
+    private let shotCheck = NSButton(checkboxWithTitle: "Ekran görüntüsü aracını kullan", target: nil, action: nil)
+    private let shotKeyLabel = NSTextField(labelWithString: "")
+    private let shotKeyButton = NSButton(title: "Değiştir", target: nil, action: nil)
     private var refresh: Timer?
     weak var app: AppDelegate?
 
@@ -668,6 +693,13 @@ final class SettingsWindow: NSWindowController {
         let hkRow = NSStackView(views: [NSTextField(labelWithString: "Pencere değiştir:"), hotkeyPopup])
         hkRow.orientation = .horizontal; hkRow.spacing = 8
 
+        shotCheck.target = self; shotCheck.action = #selector(shotChanged)
+        shotKeyButton.target = self; shotKeyButton.action = #selector(recordShotKey)
+        shotKeyLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        let shotRow = NSStackView(views: [NSTextField(labelWithString: "Kısayol:"), shotKeyLabel, shotKeyButton])
+        shotRow.orientation = .horizontal; shotRow.spacing = 8
+        NotificationCenter.default.addObserver(forName: ShotHotkey.changed, object: nil, queue: .main) { [weak self] _ in self?.loadShot() }
+
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -684,6 +716,9 @@ final class SettingsWindow: NSWindowController {
             permRow(axStatus, "Erişilebilirlik", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu.", axButton, #selector(openAX)),
             permRow(scStatus, "Ekran Kaydı", "Pencerelerin küçük resimleri için. Verilmezse simge gösterilir.", scButton, #selector(openSC)),
             note("Ayar sayfasında listede WinTab yoksa + ile /Applications/WinTab.app'ı ekle ve anahtarı aç. İzin verildiğinde uygulama gerekirse kendini yeniden başlatır."),
+            separator(),
+            section("Ekran Görüntüsü"), shotCheck, shotRow,
+            note("Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal."),
             separator(),
             section("Genel"), loginCheck, awakeCheck,
             separator(),
@@ -729,7 +764,21 @@ final class SettingsWindow: NSWindowController {
         if let i = hotkeyPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == cur }) { hotkeyPopup.selectItem(at: i) }
         loginCheck.state = LoginItem.enabled ? .on : .off
         awakeCheck.state = KeepAwake.enabled ? .on : .off
+        loadShot()
         loadPermissions()
+    }
+
+    private func loadShot() {
+        shotCheck.state = ShotHotkey.enabled ? .on : .off
+        shotKeyLabel.stringValue = ShotHotkey.recording ? "tuşlara bas…" : ShotHotkey.display
+        shotKeyButton.title = ShotHotkey.recording ? "İptal" : "Değiştir"
+        shotKeyButton.isEnabled = ShotHotkey.enabled
+    }
+
+    @objc private func shotChanged() { ShotHotkey.enabled = shotCheck.state == .on; loadShot() }
+    @objc private func recordShotKey() {
+        ShotHotkey.recording.toggle()
+        loadShot()
     }
 
     private func loadPermissions() {
@@ -762,13 +811,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var hotkey: HotkeyTap!
     var status: NSStatusItem!
     var settings: SettingsWindow!
+    let screenshot = ScreenshotTool()
     let awakeItem = NSMenuItem(title: "Uyku Engelle", action: #selector(toggleAwake), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ n: Notification) {
         switcher = Switcher()
         hotkey = HotkeyTap(switcher)
         settings = SettingsWindow(app: self)
-        if CommandLine.arguments.contains("--debug") { installDebugHooks() }
+        onScreenshotHotkey = { [weak self] in self?.screenshot.start() }
+        if CommandLine.arguments.contains("--debug") { debugLog = true; installDebugHooks() }
 
         // Ekran Kaydı izni sonradan verilirse macOS yeniden başlatma ister; bunu kendimiz yapalım.
         // Yalnızca izin yokken 3 sn'de bir bakar, izin gelince durur.
@@ -782,6 +833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeepAwake.apply()
         let menu = NSMenu()
         menu.addItem(withTitle: "Ayarlar…", action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(withTitle: "Ekran Görüntüsü Al", action: #selector(takeScreenshot), keyEquivalent: "")
         menu.addItem(awakeItem)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Çıkış", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -793,6 +845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() { settings.show() }
+    @objc func takeScreenshot() { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.screenshot.start() } }
 
     @objc func toggleAwake() {
         KeepAwake.enabled.toggle()
@@ -830,9 +883,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "show": s.holdOpen = true; s.show()
             case "hold": s.holdOpen = true
             case "next": s.step(1)
+            case let cmd? where cmd.hasPrefix("select:"):
+                if let i = s.windows.firstIndex(where: { ($0.app.localizedName ?? "").lowercased().contains(cmd.dropFirst(7).lowercased()) }) { s.selected = i; s.grid.needsDisplay = true }
+                NSLog("liste: %@", s.windows.enumerated().map { "\($0.offset):\($0.element.app.localizedName ?? "?")[\($0.element.state ?? "")]\($0.offset == s.selected ? "*" : "")" }.joined(separator: " "))
             case "cancel": s.holdOpen = false; s.cancel()
             case "commit": s.holdOpen = false; s.commit()
             case "settings": self.openSettings()
+            case "shot": self.screenshot.start()
             default: break
             }
         }

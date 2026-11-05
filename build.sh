@@ -14,7 +14,7 @@ IDENTITY="${SIGN_IDENTITY:-WinTab Yerel Imza}"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -swift-version 5 -target arm64-apple-macos14.0 main.swift \
+swiftc -O -swift-version 5 -target arm64-apple-macos14.0 main.swift Screenshot.swift \
   -o "$APP/Contents/MacOS/WinTab" \
   -framework AppKit -framework ScreenCaptureKit -framework ApplicationServices -framework ServiceManagement
 cp Info.plist "$APP/Contents/Info.plist"
