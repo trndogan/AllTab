@@ -19,7 +19,7 @@ IDENTITY="${SIGN_IDENTITY:-}"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -swift-version 5 -target arm64-apple-macos14.0 main.swift Screenshot.swift \
+swiftc -O -swift-version 5 -target arm64-apple-macos14.0 main.swift Screenshot.swift Gestures.swift Updater.swift \
   -o "$APP/Contents/MacOS/AllTab" \
   -framework AppKit -framework ScreenCaptureKit -framework ApplicationServices -framework ServiceManagement
 cp Info.plist "$APP/Contents/Info.plist"

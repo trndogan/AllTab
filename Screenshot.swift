@@ -115,7 +115,19 @@ enum Mark {
     }
 }
 
-enum Tool: Int { case rect, arrow, pen }
+enum Tool: Int { case rect, arrow, pen, move }
+
+extension Mark {
+    /// The same mark shifted by (dx, dy), used when the selection is moved.
+    func translated(_ dx: CGFloat, _ dy: CGFloat) -> Mark {
+        func t(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + dx, y: p.y + dy) }
+        switch self {
+        case .rect(let r): return .rect(r.offsetBy(dx: dx, dy: dy))
+        case .arrow(let a, let b): return .arrow(t(a), t(b))
+        case .pen(let pts): return .pen(pts.map(t))
+        }
+    }
+}
 
 // MARK: - Kaplama penceresi
 
@@ -135,8 +147,10 @@ final class ShotView: NSView {
     private var dragStart: CGPoint?
     private var live: Mark?
     private var selecting = false
+    private var moving = false
+    private var spaceDown = false
     private let toolbar = NSVisualEffectView()
-    private let tools = NSSegmentedControl(labels: [L.t("▭ Rectangle", "▭ Çerçeve"), L.t("→ Arrow", "→ Ok"), L.t("✎ Pen", "✎ Kalem")], trackingMode: .selectOne, target: nil, action: nil)
+    private let tools = NSSegmentedControl(labels: [L.t("▭ Rectangle", "▭ Çerçeve"), L.t("→ Arrow", "→ Ok"), L.t("✎ Pen", "✎ Kalem"), L.t("✥ Move", "✥ Taşı")], trackingMode: .selectOne, target: nil, action: nil)
     private let sizeLabel = NSTextField(labelWithString: "")
 
     override var isFlipped: Bool { true }
@@ -246,13 +260,19 @@ final class ShotView: NSView {
 
     override func mouseDown(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
-        if let sel = selection?.standardized, sel.contains(p) {
+        if let sel = selection?.standardized, sel.contains(p), tool == .move || spaceDown {
+            // Seçimi taşı (Taşı aracı ya da Space basılı)
+            moving = true
+            dragStart = p
+            NSCursor.closedHand.set()
+        } else if let sel = selection?.standardized, sel.contains(p), tool != .move {
             // Seçim içinde: işaret çiz
             dragStart = p
             switch tool {
             case .rect: live = .rect(CGRect(origin: p, size: .zero))
             case .arrow: live = .arrow(p, p)
             case .pen: live = .pen([p])
+            case .move: break
             }
         } else {
             // Yeni seçim
@@ -268,7 +288,10 @@ final class ShotView: NSView {
     override func mouseDragged(with e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil)
         guard let s = dragStart else { return }
-        if selecting {
+        if moving {
+            move(by: CGPoint(x: p.x - s.x, y: p.y - s.y))
+            dragStart = p
+        } else if selecting {
             selection = CGRect(x: s.x, y: s.y, width: p.x - s.x, height: p.y - s.y)
             if let sel = selection?.standardized { updateSizeLabel(sel) }
         } else if let l = live {
@@ -281,8 +304,23 @@ final class ShotView: NSView {
         needsDisplay = true
     }
 
+    /// Moves the selection together with its marks, keeping it fully on screen.
+    private func move(by d: CGPoint) {
+        guard let sel = selection?.standardized else { return }
+        let dx = min(max(d.x, -sel.minX), bounds.width - sel.maxX)
+        let dy = min(max(d.y, -sel.minY), bounds.height - sel.maxY)
+        guard dx != 0 || dy != 0 else { return }
+        selection = sel.offsetBy(dx: dx, dy: dy)
+        marks = marks.map { $0.translated(dx, dy) }
+        layoutChrome()
+        needsDisplay = true
+    }
+
     override func mouseUp(with e: NSEvent) {
-        if selecting {
+        if moving {
+            moving = false
+            NSCursor.arrow.set()
+        } else if selecting {
             selecting = false
             if let sel = selection?.standardized, sel.width < 4 || sel.height < 4 { selection = nil }
             else { selection = selection?.standardized }
@@ -308,9 +346,17 @@ final class ShotView: NSView {
         case (18, false): tools.selectedSegment = 0; toolChanged() // 1
         case (19, false): tools.selectedSegment = 1; toolChanged() // 2
         case (20, false): tools.selectedSegment = 2; toolChanged() // 3
+        case (21, false): tools.selectedSegment = 3; toolChanged() // 4
+        case (49, _): spaceDown = true                            // Space: hold to move the selection
+        case (123, _), (124, _), (125, _), (126, _):              // arrows nudge the selection (Shift = 10 px)
+            let n: CGFloat = e.modifierFlags.contains(.shift) ? 10 : 1
+            move(by: CGPoint(x: e.keyCode == 123 ? -n : e.keyCode == 124 ? n : 0,
+                             y: e.keyCode == 126 ? -n : e.keyCode == 125 ? n : 0))
         default: break
         }
     }
+
+    override func keyUp(with e: NSEvent) { if e.keyCode == 49 { spaceDown = false } }
 
     @objc private func toolChanged() { tool = Tool(rawValue: tools.selectedSegment) ?? .rect }
     @objc private func undo() { _ = marks.popLast(); needsDisplay = true }

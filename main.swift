@@ -285,7 +285,6 @@ final class GridView: NSView {
     var cell = CGSize(width: 232, height: 176)
     let gap: CGFloat = 10
     let pad: CGFloat = 16
-    private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
 
@@ -300,18 +299,7 @@ final class GridView: NSView {
         return (0..<n).first { rect($0).contains(p) }
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let t = tracking { removeTrackingArea(t) }
-        tracking = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self)
-        addTrackingArea(tracking!)
-    }
-
-    override func mouseMoved(with e: NSEvent) {
-        guard let s = switcher, let i = index(at: convert(e.locationInWindow, from: nil)), i != s.selected else { return }
-        s.selected = i
-        needsDisplay = true
-    }
+    // No hover tracking: the mouse position never changes the selection, only a click opens a window.
 
     override func mouseDown(with e: NSEvent) {
         guard let s = switcher, let i = index(at: convert(e.locationInWindow, from: nil)) else { return }
@@ -731,6 +719,8 @@ final class SettingsWindow: NSWindowController {
     private let hotkeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let loginCheck = NSButton(checkboxWithTitle: L.t("Launch at login", "Girişte otomatik başlat"), target: nil, action: nil)
     private let awakeCheck = NSButton(checkboxWithTitle: L.t("Keep awake (display never sleeps, lid close still sleeps)", "Uyku engelle (ekran uyumasın, kapak kapanınca uyur)"), target: nil, action: nil)
+    private let swipeCheck = NSButton(checkboxWithTitle: L.t("Two-finger swipe in Finder: right = Back, left = Forward", "Finder'da iki parmak kaydırma: sağa = Geri, sola = İleri"), target: nil, action: nil)
+    private let updateCheck = NSButton(checkboxWithTitle: L.t("Check for updates automatically", "Güncellemeleri otomatik denetle"), target: nil, action: nil)
     private let shotCheck = NSButton(checkboxWithTitle: L.t("Enable screenshot tool", "Ekran görüntüsü aracını kullan"), target: nil, action: nil)
     private let shotKeyLabel = NSTextField(labelWithString: "")
     private let shotKeyButton = NSButton(title: L.t("Change", "Değiştir"), target: nil, action: nil)
@@ -786,6 +776,11 @@ final class SettingsWindow: NSWindowController {
         hotkeyPopup.target = self; hotkeyPopup.action = #selector(hotkeyChanged)
         loginCheck.target = self; loginCheck.action = #selector(loginChanged)
         awakeCheck.target = self; awakeCheck.action = #selector(awakeChanged)
+        swipeCheck.target = self; swipeCheck.action = #selector(swipeChanged)
+        updateCheck.target = self; updateCheck.action = #selector(updateChanged)
+        let updateNow = NSButton(title: L.t("Check Now", "Şimdi Denetle"), target: self, action: #selector(checkUpdateNow))
+        let updateRow = NSStackView(views: [updateCheck, updateNow])
+        updateRow.orientation = .horizontal; updateRow.spacing = 12
 
         let hkRow = NSStackView(views: [NSTextField(labelWithString: L.t("Switch windows:", "Pencere değiştir:")), hotkeyPopup])
         hkRow.orientation = .horizontal; hkRow.spacing = 8
@@ -807,8 +802,8 @@ final class SettingsWindow: NSWindowController {
 
         let rows: [NSView] = [
             section(L.t("Shortcut", "Kısayol")), hkRow,
-            note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys and the mouse work too. Release to switch, Esc cancels.",
-                     "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları ve fare de çalışır. Bırakınca seçili pencereye geçer, Esc iptal.")),
+            note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys work too, and a click opens a window. Release to switch, Esc cancels.",
+                     "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları da çalışır, tıklayınca pencere açılır. Bırakınca seçili pencereye geçer, Esc iptal.")),
             separator(),
             section(L.t("Permissions", "İzinler")),
             permRow(axStatus, L.t("Accessibility", "Erişilebilirlik"), L.t("Required to capture the shortcut and bring windows to front.", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu."), axButton, #selector(openAX)),
@@ -817,10 +812,14 @@ final class SettingsWindow: NSWindowController {
                      "Ayar sayfasında listede AllTab yoksa + ile /Applications/AllTab.app'ı ekle ve anahtarı aç. İzin verildiğinde uygulama gerekirse kendini yeniden başlatır.")),
             separator(),
             section(L.t("Screenshot", "Ekran Görüntüsü")), shotCheck, shotRow,
-            note(L.t("Press the shortcut to freeze the screen, drag to select an area, mark it with a red rectangle / arrow / pen. ⌘C copies (then ⌘V anywhere), ⌘S saves, ⌘Z undoes, Esc cancels.",
-                     "Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal.")),
+            note(L.t("Press the shortcut to freeze the screen, drag to select an area, mark it with a red rectangle / arrow / pen. To move the selection use the Move tool (4), hold Space while dragging, or the arrow keys. ⌘C copies (then ⌘V anywhere), ⌘S saves, ⌘Z undoes, Esc cancels.",
+                     "Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. Seçimi taşımak için Taşı aracı (4), Space basılı sürükleme ya da ok tuşları. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal.")),
             separator(),
-            section(L.t("General", "Genel")), loginCheck, awakeCheck,
+            section(L.t("Finder", "Finder")), swipeCheck,
+            note(L.t("Swipe with two fingers in a Finder window, like in Chrome. Uses Finder's own Back / Forward commands.",
+                     "Finder penceresinde iki parmakla kaydır, Chrome'daki gibi. Finder'ın kendi Geri / İleri komutunu kullanır.")),
+            separator(),
+            section(L.t("General", "Genel")), loginCheck, awakeCheck, updateRow,
             separator(),
             footer,
         ]
@@ -881,6 +880,8 @@ final class SettingsWindow: NSWindowController {
         if let i = hotkeyPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == cur }) { hotkeyPopup.selectItem(at: i) }
         loginCheck.state = LoginItem.enabled ? .on : .off
         awakeCheck.state = KeepAwake.enabled ? .on : .off
+        swipeCheck.state = SwipeNav.enabled ? .on : .off
+        updateCheck.state = Updater.autoCheck ? .on : .off
         loadShot()
         loadPermissions()
     }
@@ -919,6 +920,9 @@ final class SettingsWindow: NSWindowController {
         loginCheck.state = LoginItem.enabled ? .on : .off
     }
     @objc private func awakeChanged() { KeepAwake.enabled = awakeCheck.state == .on; app?.syncUI() }
+    @objc private func swipeChanged() { SwipeNav.enabled = swipeCheck.state == .on }
+    @objc private func updateChanged() { Updater.autoCheck = updateCheck.state == .on }
+    @objc private func checkUpdateNow() { Updater.check(interactive: true) }
     @objc private func openAX() { Permissions.openAccessibility() }
     @objc private func openSC() { Permissions.openScreenRecording() }
     @objc private func restart() { app?.relaunch() }
@@ -960,11 +964,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         KeepAwake.apply()
+        SwipeNav.apply()
+        Updater.checkIfDue()
         let menu = NSMenu()
         menu.addItem(withTitle: L.t("Settings…", "Ayarlar…"), action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(withTitle: L.t("Take Screenshot", "Ekran Görüntüsü Al"), action: #selector(takeScreenshot), keyEquivalent: "")
         menu.addItem(awakeItem)
         menu.addItem(.separator())
+        menu.addItem(withTitle: L.t("Check for Updates…", "Güncellemeleri Denetle…"), action: #selector(checkForUpdates), keyEquivalent: "")
         menu.addItem(withTitle: L.t("Quit", "Çıkış"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         status.menu = menu
         syncUI()
@@ -981,6 +988,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() { settings.show() }
+    @objc func checkForUpdates() { Updater.check(interactive: true) }
     @objc func takeScreenshot() { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.screenshot.start() } }
 
     @objc func toggleAwake() {
@@ -1050,6 +1058,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "commit": s.holdOpen = false; s.commit()
             case "settings": self.openSettings()
             case "shot": self.screenshot.start()
+            case "swipeback": SwipeNav.go(back: true)
+            case "swipeforward": SwipeNav.go(back: false)
+            case "update": Updater.check(interactive: true)
             case "grant": self.relaunch(afterGrant: true)
             case "assist": self.settings.assisting = true
             default: break
