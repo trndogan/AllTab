@@ -126,6 +126,8 @@ struct WindowInfo {
     var ax: AXUIElement?
 
     var label: String { title.isEmpty ? (app.localizedName ?? "") : title }
+    /// Finder cannot be quit (macOS relaunches it at once), so it gets no Quit button and Q beeps.
+    var canQuit: Bool { app.bundleIdentifier != "com.apple.finder" }
     var state: String? {
         if minimized { return L.t("minimized", "simge durumunda") }
         if app.isHidden { return L.t("hidden", "gizli") }
@@ -329,16 +331,52 @@ final class GridView: NSView {
     }
 
     // The mouse position never changes the selection, only a click opens a window.
-    // Hover is tracked for one thing: showing the × (close) button on the cell under the mouse.
+    // Hover is tracked for the two buttons drawn on the selected cell and the one under the mouse:
+    // × (close the window) in the top right corner, Quit (quit the app) in the bottom right corner.
+    // They sit in opposite corners so closing a window never quits the whole app by accident.
+    private enum Part { case cell, close, quit }
     private(set) var hover: Int?
-    private var hoverClose = false
+    private var hoverPart = Part.cell
 
-    /// × button in the top right corner of a cell, drawn on the selected cell and the one under the mouse.
+    private static let para: NSParagraphStyle = {
+        let p = NSMutableParagraphStyle(); p.lineBreakMode = .byTruncatingTail; return p
+    }()
+    private static let titleAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 12.5, weight: .medium), .foregroundColor: NSColor.white, .paragraphStyle: para]
+    private static let stateAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.white.withAlphaComponent(0.7), .paragraphStyle: para]
+    private static let quitAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.white]
+    private static let quitText = L.t("Quit", "Çık")
+    private static let quitIcon = NSImage(systemSymbolName: "power", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [.white])))
+
+    /// × button in the top right corner of a cell.
     func closeRect(_ i: Int) -> CGRect {
         let r = rect(i)
         return CGRect(x: r.maxX - 27, y: r.minY + 7, width: 19, height: 19)
     }
     private func onClose(_ p: CGPoint, _ i: Int) -> Bool { closeRect(i).insetBy(dx: -4, dy: -4).contains(p) }
+
+    /// State badge (hidden / minimized / other desktop) in the bottom left corner.
+    private func badgeRect(_ i: Int, _ text: String) -> CGRect {
+        let r = rect(i)
+        let size = (text as NSString).size(withAttributes: Self.stateAttrs)
+        return CGRect(x: r.minX + 10, y: r.maxY - 18, width: size.width + 10, height: 15)
+    }
+
+    /// Quit button in the bottom right corner, icon only when the label would run into the badge. None for Finder.
+    func quitRect(_ i: Int) -> (rect: CGRect, label: Bool)? {
+        guard let s = switcher, s.windows.indices.contains(i), s.windows[i].canQuit else { return nil }
+        let r = rect(i)
+        let full = 30 + (Self.quitText as NSString).size(withAttributes: Self.quitAttrs).width
+        let left = s.windows[i].state.map { badgeRect(i, $0).maxX + 6 } ?? r.minX + 10
+        let label = r.maxX - 10 - full >= left
+        let w: CGFloat = label ? full : 24
+        return (CGRect(x: r.maxX - 10 - w, y: r.maxY - 20, width: w, height: 18), label)
+    }
+    private func onQuit(_ p: CGPoint, _ i: Int) -> Bool { quitRect(i)?.rect.insetBy(dx: -3, dy: -3).contains(p) ?? false }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -351,10 +389,13 @@ final class GridView: NSView {
     override func mouseExited(with e: NSEvent) { setHover(nil) }
 
     private func setHover(_ p: CGPoint?) {
-        let h = p.flatMap { index(at: $0) }
-        let c = h.map { onClose(p!, $0) } ?? false
-        guard h != hover || c != hoverClose else { return }
-        hover = h; hoverClose = c
+        var h: Int?, part = Part.cell
+        if let p, let i = index(at: p) {
+            h = i
+            part = onClose(p, i) ? .close : onQuit(p, i) ? .quit : .cell
+        }
+        guard h != hover || part != hoverPart else { return }
+        hover = h; hoverPart = part
         needsDisplay = true
     }
 
@@ -367,17 +408,13 @@ final class GridView: NSView {
         let p = convert(e.locationInWindow, from: nil)
         guard let s = switcher, let i = index(at: p) else { return }
         if onClose(p, i) { s.closeWindow(at: i); return }
+        if onQuit(p, i) { s.quitApp(at: i); return }
         s.selected = i
         s.commit()
     }
 
     override func draw(_ dirty: NSRect) {
         guard let s = switcher else { return }
-        let para = NSMutableParagraphStyle(); para.lineBreakMode = .byTruncatingTail
-        let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.5, weight: .medium), .foregroundColor: NSColor.white, .paragraphStyle: para]
-        let stateAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.white.withAlphaComponent(0.7), .paragraphStyle: para]
 
         for (i, w) in s.windows.enumerated() {
             let r = rect(i)
@@ -394,12 +431,12 @@ final class GridView: NSView {
             icon?.draw(in: CGRect(x: r.minX + 10, y: r.minY + 9, width: 16, height: 16), from: .zero,
                        operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             let closable = i == s.selected || i == hover
-            (w.label as NSString).draw(in: CGRect(x: r.minX + 31, y: r.minY + 8, width: r.width - (closable ? 64 : 41), height: 18), withAttributes: titleAttrs)
+            (w.label as NSString).draw(in: CGRect(x: r.minX + 31, y: r.minY + 8, width: r.width - (closable ? 64 : 41), height: 18), withAttributes: Self.titleAttrs)
 
             // Kapat düğmesi (×): seçili hücrede ve farenin altındaki hücrede
             if closable {
                 let c = closeRect(i)
-                let hot = hoverClose && i == hover
+                let hot = hoverPart == .close && i == hover
                 (hot ? NSColor.systemRed : NSColor.black.withAlphaComponent(0.45)).setFill()
                 NSBezierPath(ovalIn: c).fill()
                 let m = c.insetBy(dx: 6.5, dy: 6.5)
@@ -427,12 +464,32 @@ final class GridView: NSView {
             }
 
             // Durum rozeti (gizli / simge durumunda / başka masaüstü)
+            let quit = closable ? quitRect(i) : nil
             if let st = w.state {
-                let size = (st as NSString).size(withAttributes: stateAttrs)
-                let badge = CGRect(x: r.minX + 10, y: r.maxY - 18, width: size.width + 10, height: 15)
+                var badge = badgeRect(i, st)
+                // Narrow cell: the badge gives way to the Quit button, its text is cut short
+                if let q = quit { badge.size.width = min(badge.width, q.rect.minX - 6 - badge.minX) }
                 NSColor.black.withAlphaComponent(0.5).setFill()
                 NSBezierPath(roundedRect: badge, xRadius: 4, yRadius: 4).fill()
-                (st as NSString).draw(in: badge.insetBy(dx: 5, dy: 0).offsetBy(dx: 0, dy: 1), withAttributes: stateAttrs)
+                (st as NSString).draw(in: badge.insetBy(dx: 5, dy: 0).offsetBy(dx: 0, dy: 1), withAttributes: Self.stateAttrs)
+            }
+
+            // Uygulamadan çık düğmesi: ×'in karşı köşesinde, aynı hücrelerde
+            if let q = quit {
+                let hot = hoverPart == .quit && i == hover
+                (hot ? NSColor.systemRed : NSColor.black.withAlphaComponent(0.55)).setFill()
+                NSBezierPath(roundedRect: q.rect, xRadius: 9, yRadius: 9).fill()
+                if let img = Self.quitIcon {
+                    let h: CGFloat = 11, iw = h * img.size.width / max(img.size.height, 1)
+                    let x = q.label ? q.rect.minX + 8 : q.rect.midX - iw / 2
+                    img.draw(in: CGRect(x: x, y: q.rect.midY - h / 2, width: iw, height: h), from: .zero,
+                             operation: .sourceOver, fraction: hot ? 1 : 0.9, respectFlipped: true, hints: nil)
+                }
+                if q.label {
+                    let t = Self.quitText as NSString
+                    let ts = t.size(withAttributes: Self.quitAttrs)
+                    t.draw(at: CGPoint(x: q.rect.minX + 23, y: q.rect.midY - ts.height / 2), withAttributes: Self.quitAttrs)
+                }
             }
         }
     }
@@ -518,11 +575,13 @@ final class Switcher {
         drop([w.id], recheckAfter: 1.2)
     }
 
-    /// Seçili pencerenin uygulamasından çıkar (⌘Q gibi, uygulama kaydetmeyi sorabilir). Finder'dan çıkılmaz.
-    func quitSelectedApp() {
-        guard visible, windows.indices.contains(selected) else { return }
-        let app = windows[selected].app
-        guard app.bundleIdentifier != "com.apple.finder" else { NSSound.beep(); return }
+    func quitSelectedApp() { quitApp(at: selected) }
+
+    /// Pencerenin uygulamasından çıkar (⌘Q gibi, uygulama kaydetmeyi sorabilir). Finder'dan çıkılmaz.
+    func quitApp(at i: Int) {
+        guard visible, windows.indices.contains(i) else { return }
+        guard windows[i].canQuit else { NSSound.beep(); return }
+        let app = windows[i].app
         dlog("quit \(app.localizedName ?? "?")")
         app.terminate()
         drop(windows.filter { $0.pid == app.processIdentifier }.map { $0.id }, recheckAfter: 3)
@@ -964,8 +1023,8 @@ final class SettingsWindow: NSWindowController {
             section(L.t("Shortcut", "Kısayol")), hkRow,
             note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys work too, and a click opens a window. Release to switch, Esc cancels.",
                      "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları da çalışır, tıklayınca pencere açılır. Bırakınca seçili pencereye geçer, Esc iptal.")),
-            note(L.t("While the list is open: W or the × button closes the window, Q quits its app.",
-                     "Liste açıkken W ya da × düğmesi pencereyi kapatır, Q uygulamadan çıkar.")),
+            note(L.t("While the list is open: W or the × button closes the window, Q or the Quit button quits its app.",
+                     "Liste açıkken W ya da × düğmesi pencereyi kapatır, Q ya da Çık düğmesi uygulamadan çıkar.")),
             separator(),
             section(L.t("Permissions", "İzinler")),
             permRow(axStatus, L.t("Accessibility", "Erişilebilirlik"), L.t("Required to capture the shortcut and bring windows to front.", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu."), axButton, #selector(openAX)),
@@ -1223,7 +1282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case let cmd? where cmd.hasPrefix("close:"):
                 if let i = find(cmd.dropFirst(6)) { s.closeWindow(at: i) } else { dlog("close: eslesme yok") }
             case let cmd? where cmd.hasPrefix("quit:"):
-                if let i = find(cmd.dropFirst(5)) { s.selected = i; s.quitSelectedApp() } else { dlog("quit: eslesme yok") }
+                if let i = find(cmd.dropFirst(5)) { s.quitApp(at: i) } else { dlog("quit: eslesme yok") }
             case let cmd? where cmd.hasPrefix("drop:"):   // kapatmadan yalnızca listeden düşürür: geri dönüşü dener
                 if let i = find(cmd.dropFirst(5)) { s.drop([s.windows[i].id], recheckAfter: 1.2) } else { dlog("drop: eslesme yok") }
             case "list":
