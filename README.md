@@ -10,6 +10,7 @@ Built because AltTab and DockDoor felt heavy and kept pushing premium features. 
 - Hold the modifier, **Tab** forward, **Shift+Tab** back, arrow keys and mouse work too. Release to switch, **Esc** to cancel.
 - **Per-window** list (not per-app), most recently used first. A quick Cmd+Tab returns to the previous window.
 - **Hidden (Cmd+H)**, **minimized** and **other-desktop** windows are listed with a badge. Selecting one unhides, restores or switches Space as needed.
+- **Close without switching**: while the list is open, **W** or the **×** button on a cell closes that window, **Q** quits its app. The list stays open, so you can clean up several windows in one go. Apps still ask before discarding unsaved changes.
 - Thumbnails are captured only while the panel is open (ScreenCaptureKit). Without Screen Recording permission, app icons are shown instead.
 - Opens on top of full-screen apps, on the screen where the mouse is.
 - **Screenshot tool** (default **⌘Ğ** on Turkish keyboards, ⌘[ elsewhere; change it in Settings or turn it off): freeze the screen, drag to select, mark with a red **rectangle / arrow / pen**. **⌘C** copies (then ⌘V anywhere), **⌘S** saves, **⌘Z** undoes, **Esc** cancels. Move the selected area (marks move with it) with the **✥ Move** tool (**4**), by holding **Space** while dragging, or with the arrow keys (Shift = 10 px). Output is a PNG at native pixel resolution.
@@ -48,7 +49,9 @@ If you have an Apple Developer account, install your certificate once (Xcode →
 | Cmd+Tab (hold) | Open the switcher, move to the next window |
 | Cmd+Shift+Tab | Previous window |
 | ← → ↑ ↓ | Move around the grid |
-| Mouse | Hover to select, click to switch |
+| Mouse | Click a window to switch, click its × to close it |
+| W | Close the selected window |
+| Q | Quit the selected window's app |
 | Release Cmd / Enter | Switch to the selected window |
 | Esc | Cancel |
 
@@ -85,4 +88,4 @@ MIT
 
 ### Türkçe
 
-macOS için Windows tarzı Alt+Tab (varsayılan Cmd+Tab) pencere değiştirici. Gizli, simge durumundaki ve başka masaüstündeki pencereler dahil **tüm** pencereleri küçük resimleriyle listeler, tuşu bırakınca geçer. Yanında Lightshot tarzı ekran görüntüsü aracı (⌘Ğ, alan seç, kırmızı çerçeve/ok/kalem, ⌘C kopyala, ⌘S kaydet) ve uyku engelleme var. Kurulum: `./make-cert.sh` (bir kez) ve `./build.sh install`, ardından açılan ayarlar penceresinden Erişilebilirlik ve Ekran Kaydı izinlerini ver. Sistem dili Türkçeyse arayüz Türkçedir.
+macOS için Windows tarzı Alt+Tab (varsayılan Cmd+Tab) pencere değiştirici. Gizli, simge durumundaki ve başka masaüstündeki pencereler dahil **tüm** pencereleri küçük resimleriyle listeler, tuşu bırakınca geçer. Liste açıkken W ya da × düğmesi pencereyi kapatır, Q uygulamadan çıkar. Yanında Lightshot tarzı ekran görüntüsü aracı (⌘Ğ, alan seç, kırmızı çerçeve/ok/kalem, ⌘C kopyala, ⌘S kaydet) ve uyku engelleme var. Kurulum: `./make-cert.sh` (bir kez) ve `./build.sh install`, ardından açılan ayarlar penceresinden Erişilebilirlik ve Ekran Kaydı izinlerini ver. Sistem dili Türkçeyse arayüz Türkçedir.

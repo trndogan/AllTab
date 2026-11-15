@@ -22,6 +22,9 @@ enum L {
 @_silgen_name("_AXUIElementGetWindow")
 func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+@_silgen_name("_AXUIElementCreateWithRemoteToken")
+func _AXUIElementCreateWithRemoteToken(_ token: CFData) -> Unmanaged<AXUIElement>?
+
 typealias SetFrontFn = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, CGWindowID, UInt32) -> CGError
 typealias PostEventFn = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UnsafePointer<UInt8>) -> CGError
 typealias PSNFn = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
@@ -82,6 +85,32 @@ func axRaise(_ el: AXUIElement) {
     AXUIElementPerformAction(el, kAXRaiseAction as CFString)
     AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, kCFBooleanTrue)
     AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+}
+
+/// Başka masaüstündeki pencerenin AX öğesi kAXWindows listesinde yoktur. AltTab yöntemi: uygulamanın
+/// AX öğe kimlikleri sırayla denenir, aranan pencere kimliğini taşıyan pencere öğesi bulunur.
+func axWindowByScan(pid: pid_t, id: CGWindowID) -> AXUIElement? {
+    var token = Data(count: 20)
+    token.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid) { Data($0) })
+    token.replaceSubrange(8..<12, with: withUnsafeBytes(of: Int32(0x636f636f)) { Data($0) })
+    for n in UInt64(0)..<1000 {
+        token.replaceSubrange(12..<20, with: withUnsafeBytes(of: n) { Data($0) })
+        guard let el = _AXUIElementCreateWithRemoteToken(token as CFData)?.takeRetainedValue() else { continue }
+        var wid: CGWindowID = 0
+        if _AXUIElementGetWindow(el, &wid) == .success, wid == id,
+           (axValue(el, kAXRoleAttribute) as? String) == (kAXWindowRole as String) { return el }
+    }
+    return nil
+}
+
+/// Pencereyi kendi kapat düğmesine basarak kapatır; uygulama kaydetmeyi sorarsa pencere açık kalır.
+/// Kapat düğmesi bulunamazsa false döner. Kayıt sorusu çıkınca AXPress uzun süre dönmeyebilir,
+/// bu yüzden arka plan kuyruğundan çağrılır.
+func axClose(_ w: WindowInfo) -> Bool {
+    guard let el = w.ax ?? axWindows(of: w.pid)[w.id] ?? axWindowByScan(pid: w.pid, id: w.id),
+          let button = axValue(el, kAXCloseButtonAttribute) else { return false }
+    AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+    return true
 }
 
 // MARK: - Pencere modeli
@@ -299,10 +328,45 @@ final class GridView: NSView {
         return (0..<n).first { rect($0).contains(p) }
     }
 
-    // No hover tracking: the mouse position never changes the selection, only a click opens a window.
+    // The mouse position never changes the selection, only a click opens a window.
+    // Hover is tracked for one thing: showing the × (close) button on the cell under the mouse.
+    private(set) var hover: Int?
+    private var hoverClose = false
+
+    /// × button in the top right corner of a cell, drawn on the selected cell and the one under the mouse.
+    func closeRect(_ i: Int) -> CGRect {
+        let r = rect(i)
+        return CGRect(x: r.maxX - 27, y: r.minY + 7, width: 19, height: 19)
+    }
+    private func onClose(_ p: CGPoint, _ i: Int) -> Bool { closeRect(i).insetBy(dx: -4, dy: -4).contains(p) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+    override func mouseMoved(with e: NSEvent) { setHover(convert(e.locationInWindow, from: nil)) }
+    override func mouseEntered(with e: NSEvent) { setHover(convert(e.locationInWindow, from: nil)) }
+    override func mouseExited(with e: NSEvent) { setHover(nil) }
+
+    private func setHover(_ p: CGPoint?) {
+        let h = p.flatMap { index(at: $0) }
+        let c = h.map { onClose(p!, $0) } ?? false
+        guard h != hover || c != hoverClose else { return }
+        hover = h; hoverClose = c
+        needsDisplay = true
+    }
+
+    /// The panel opened or its cells moved: no mouse event comes, so read the mouse position ourselves.
+    func syncHover() {
+        setHover(window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) })
+    }
 
     override func mouseDown(with e: NSEvent) {
-        guard let s = switcher, let i = index(at: convert(e.locationInWindow, from: nil)) else { return }
+        let p = convert(e.locationInWindow, from: nil)
+        guard let s = switcher, let i = index(at: p) else { return }
+        if onClose(p, i) { s.closeWindow(at: i); return }
         s.selected = i
         s.commit()
     }
@@ -329,7 +393,22 @@ final class GridView: NSView {
             let icon = w.app.icon
             icon?.draw(in: CGRect(x: r.minX + 10, y: r.minY + 9, width: 16, height: 16), from: .zero,
                        operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            (w.label as NSString).draw(in: CGRect(x: r.minX + 31, y: r.minY + 8, width: r.width - 41, height: 18), withAttributes: titleAttrs)
+            let closable = i == s.selected || i == hover
+            (w.label as NSString).draw(in: CGRect(x: r.minX + 31, y: r.minY + 8, width: r.width - (closable ? 64 : 41), height: 18), withAttributes: titleAttrs)
+
+            // Kapat düğmesi (×): seçili hücrede ve farenin altındaki hücrede
+            if closable {
+                let c = closeRect(i)
+                let hot = hoverClose && i == hover
+                (hot ? NSColor.systemRed : NSColor.black.withAlphaComponent(0.45)).setFill()
+                NSBezierPath(ovalIn: c).fill()
+                let m = c.insetBy(dx: 6.5, dy: 6.5)
+                let x = NSBezierPath()
+                x.move(to: CGPoint(x: m.minX, y: m.minY)); x.line(to: CGPoint(x: m.maxX, y: m.maxY))
+                x.move(to: CGPoint(x: m.maxX, y: m.minY)); x.line(to: CGPoint(x: m.minX, y: m.maxY))
+                x.lineWidth = 1.5; x.lineCapStyle = .round
+                NSColor.white.withAlphaComponent(hot ? 1 : 0.85).setStroke(); x.stroke()
+            }
 
             // Küçük resim alanı
             let area = CGRect(x: r.minX + 10, y: r.minY + 32, width: r.width - 20, height: r.height - 44)
@@ -372,6 +451,10 @@ final class Switcher {
     /// Test için: açıkken tuş bırakma ile kapanmaz
     var holdOpen = false
     private var generation = 0
+    /// Panel açıldığı andaki sıra: pencere kapatılınca kalanlar yer değiştirmez
+    private var shownOrder: [CGWindowID: Int] = [:]
+    /// Kapatılması istenen pencereler ve gizli tutulacakları son an (kapanmazsa listeye geri döner)
+    private var closing: [CGWindowID: Date] = [:]
 
     init() {
         panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -409,12 +492,74 @@ final class Switcher {
         let ids = Set(windows.map { $0.id })
         thumbs = thumbs.filter { ids.contains($0.key) }
         selected = windows.count > 1 ? 1 : 0
+        shownOrder = Dictionary(windows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
+        closing = [:]
         layout()
         grid.needsDisplay = true
         panel.orderFrontRegardless()
         visible = true
         generation += 1
+        grid.syncHover()
         captureThumbs(generation)
+    }
+
+    // MARK: Pencere kapatma / uygulamadan çıkma (panel açık kalır)
+
+    func closeSelectedWindow() { closeWindow(at: selected) }
+
+    /// Pencereyi kapatır. Hücre hemen kaybolur; uygulama kaydetmeyi sorduğu için pencere kapanmazsa geri gelir.
+    func closeWindow(at i: Int) {
+        guard visible, windows.indices.contains(i) else { return }
+        let w = windows[i]
+        dlog("close \(w.app.localizedName ?? "?") #\(w.id) / \(w.title)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            if !axClose(w) { DispatchQueue.main.async { NSSound.beep() } }
+        }
+        drop([w.id], recheckAfter: 1.2)
+    }
+
+    /// Seçili pencerenin uygulamasından çıkar (⌘Q gibi, uygulama kaydetmeyi sorabilir). Finder'dan çıkılmaz.
+    func quitSelectedApp() {
+        guard visible, windows.indices.contains(selected) else { return }
+        let app = windows[selected].app
+        guard app.bundleIdentifier != "com.apple.finder" else { NSSound.beep(); return }
+        dlog("quit \(app.localizedName ?? "?")")
+        app.terminate()
+        drop(windows.filter { $0.pid == app.processIdentifier }.map { $0.id }, recheckAfter: 3)
+    }
+
+    func drop(_ ids: [CGWindowID], recheckAfter delay: TimeInterval) {
+        let until = Date().addingTimeInterval(delay)
+        for id in ids { closing[id] = until }
+        windows.removeAll { ids.contains($0.id) }
+        relayout()
+        let gen = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.05) { [weak self] in
+            guard let self, self.visible, self.generation == gen else { return }
+            self.refresh()
+        }
+    }
+
+    /// Listeyi yeniden okur: kapanan pencereler düşer, kapanmayanlar eski yerine döner, seçim korunur.
+    private func refresh() {
+        let now = Date()
+        closing = closing.filter { $0.value > now }
+        let keep = windows.indices.contains(selected) ? windows[selected].id : nil
+        let fresh = WindowList.fetch(mru: tracker.mru).filter { closing[$0.id] == nil }
+        let last = shownOrder.count
+        windows = fresh.enumerated().sorted {
+            (shownOrder[$0.element.id] ?? last + $0.offset) < (shownOrder[$1.element.id] ?? last + $1.offset)
+        }.map { $0.element }
+        if let k = windows.firstIndex(where: { $0.id == keep }) { selected = k }
+        relayout()
+    }
+
+    private func relayout() {
+        guard !windows.isEmpty else { hide(); return }
+        selected = min(selected, windows.count - 1)
+        layout()
+        grid.needsDisplay = true
+        grid.syncHover()
     }
 
     func step(_ d: Int) {
@@ -579,9 +724,24 @@ final class HotkeyTap {
         case 124: s.step(1)                 // →
         case 126: s.step(-s.cols)           // ↑
         case 125: s.step(s.cols)            // ↓
-        default: break
+        default:
+            // W closes the selected window, Q quits its app. A held key never repeats the action,
+            // and real keys never act on the debug hook's panel (holdOpen).
+            guard !s.holdOpen, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { break }
+            switch letter(key) {
+            case "W": s.closeSelectedWindow()
+            case "Q": s.quitSelectedApp()
+            default: break
+            }
         }
         return true
+    }
+
+    /// The letter on the key in the current keyboard layout; on non-Latin layouts the key's US position.
+    private func letter(_ key: Int64) -> String {
+        let name = ShotHotkey.keyName(UInt16(key))
+        if name.count == 1, name.unicodeScalars.allSatisfy({ $0.isASCII }) { return name }
+        return [12: "Q", 13: "W"][key] ?? ""
     }
 }
 
@@ -804,6 +964,8 @@ final class SettingsWindow: NSWindowController {
             section(L.t("Shortcut", "Kısayol")), hkRow,
             note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys work too, and a click opens a window. Release to switch, Esc cancels.",
                      "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları da çalışır, tıklayınca pencere açılır. Bırakınca seçili pencereye geçer, Esc iptal.")),
+            note(L.t("While the list is open: W or the × button closes the window, Q quits its app.",
+                     "Liste açıkken W ya da × düğmesi pencereyi kapatır, Q uygulamadan çıkar.")),
             separator(),
             section(L.t("Permissions", "İzinler")),
             permRow(axStatus, L.t("Accessibility", "Erişilebilirlik"), L.t("Required to capture the shortcut and bring windows to front.", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu."), axButton, #selector(openAX)),
@@ -1047,6 +1209,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.turandogan.alltab.debug"), object: nil, queue: .main) { [weak self] n in
             guard let self, let s = self.switcher else { return }
+            func find(_ q: Substring) -> Int? {
+                s.windows.firstIndex { ($0.app.localizedName ?? "").lowercased().contains(q.lowercased()) }
+            }
             switch n.object as? String {
             case "show": s.holdOpen = true; s.show()
             case "hold": s.holdOpen = true
@@ -1054,6 +1219,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case let cmd? where cmd.hasPrefix("select:"):
                 if let i = s.windows.firstIndex(where: { ($0.app.localizedName ?? "").lowercased().contains(cmd.dropFirst(7).lowercased()) }) { s.selected = i; s.grid.needsDisplay = true }
                 dlog("liste: " + s.windows.enumerated().map { "\($0.offset):\($0.element.app.localizedName ?? "?")[\($0.element.state ?? "")]\($0.offset == s.selected ? "*" : "")" }.joined(separator: " "))
+            // close:/quit:/drop: yalnızca adı eşleşen uygulamaya dokunur, eşleşme yoksa hiçbir şey yapmaz
+            case let cmd? where cmd.hasPrefix("close:"):
+                if let i = find(cmd.dropFirst(6)) { s.closeWindow(at: i) } else { dlog("close: eslesme yok") }
+            case let cmd? where cmd.hasPrefix("quit:"):
+                if let i = find(cmd.dropFirst(5)) { s.selected = i; s.quitSelectedApp() } else { dlog("quit: eslesme yok") }
+            case let cmd? where cmd.hasPrefix("drop:"):   // kapatmadan yalnızca listeden düşürür: geri dönüşü dener
+                if let i = find(cmd.dropFirst(5)) { s.drop([s.windows[i].id], recheckAfter: 1.2) } else { dlog("drop: eslesme yok") }
+            case "list":
+                dlog("liste: " + s.windows.enumerated().map { "\($0.offset):\($0.element.app.localizedName ?? "?")#\($0.element.id)[\($0.element.state ?? "")]\($0.offset == s.selected ? "*" : "")" }.joined(separator: " "))
+            case let cmd? where cmd.hasPrefix("index:"):
+                if let i = Int(cmd.dropFirst(6)), s.windows.indices.contains(i) { s.selected = i; s.grid.needsDisplay = true }
+            case "scan":   // seçili pencerede başka masaüstü yolunu (AX taraması) dener, hiçbir şeye basmaz
+                guard s.windows.indices.contains(s.selected) else { break }
+                let w = s.windows[s.selected]
+                let keys = "W=\(ShotHotkey.keyName(13)) Q=\(ShotHotkey.keyName(12))"
+                DispatchQueue.global().async {
+                    let t = Date()
+                    let el = axWindowByScan(pid: w.pid, id: w.id)
+                    let button = el.flatMap { axValue($0, kAXCloseButtonAttribute) } != nil
+                    dlog("scan \(w.app.localizedName ?? "?") #\(w.id) [\(w.state ?? "")] bulundu=\(el != nil) kapat=\(button) sure=\(Int(Date().timeIntervalSince(t) * 1000))ms \(keys)")
+                }
             case "cancel": s.holdOpen = false; s.cancel()
             case "commit": s.holdOpen = false; s.commit()
             case "settings": self.openSettings()
