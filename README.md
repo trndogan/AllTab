@@ -20,7 +20,7 @@ Built because AltTab and DockDoor felt heavy and kept pushing premium features. 
 - **Keep awake**: like Amphetamine's "Indefinitely" mode, the display never sleeps, closing the lid still sleeps.
 - **Finder swipe navigation**: swipe right with two fingers in a Finder window to go Back, left to go Forward, like Chrome and Safari. It presses Finder's own Go ▸ Back / Forward, so it works in every language and keyboard layout. Can be turned off in Settings.
 - **Updates**: one check at launch (at most once a day, no background timer) or **Check for Updates…** in the menu. A newer GitHub release is downloaded, verified (valid signature, same developer team, same bundle id, higher version) and swapped in, then AllTab restarts. Permissions survive because the signature stays the same.
-- Settings window with permission status and one-click links to the right System Settings pane. Launch at login via `SMAppService`.
+- Settings window (two columns, fits a laptop screen) with permission status and one-click links to the right System Settings pane. The Settings window itself shows up in the switcher while it is open. Launch at login via `SMAppService`.
 - UI in English, or Turkish when the system language is Turkish.
 
 ## Install

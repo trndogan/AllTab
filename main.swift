@@ -180,6 +180,16 @@ enum WindowList {
             return w
         }
 
+        // AllTab's own windows (Settings): it is a menu bar app, so they are read from AppKit, not from the
+        // window server or Accessibility (asking our own process through Accessibility would wait on ourselves).
+        for win in NSApp.windows where (win.isVisible || win.isMiniaturized) && win.level == .normal
+            && !(win is NSPanel) && !win.title.isEmpty {
+            var info = WindowInfo(id: CGWindowID(win.windowNumber), pid: me, app: .current, title: win.title,
+                                  bounds: win.frame, onScreen: win.isVisible && win.isOnActiveSpace)
+            info.minimized = win.isMiniaturized
+            list.append(info)
+        }
+
         // Sıralama: son kullanılan önce, sonra CG z-sırası (önden arkaya)
         let order = Dictionary(mru.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         return list.enumerated().sorted { a, b in
@@ -199,6 +209,12 @@ final class FocusTracker {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
             guard let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            if app.processIdentifier == getpid() {   // our own Settings window: AppKit knows which one is key
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    if let k = NSApp.keyWindow, !(k is NSPanel) { self?.touch(CGWindowID(k.windowNumber)) }
+                }
+                return
+            }
             self?.watch(app.processIdentifier)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.touchFocused(of: app.processIdentifier) }
         }
@@ -268,6 +284,14 @@ func dlog(_ msg: String) {
 private var activationGeneration = 0
 
 func activate(_ w: WindowInfo) {
+    // AllTab's own window: AppKit brings it forward
+    if w.pid == getpid() {
+        guard let win = NSApp.window(withWindowNumber: Int(w.id)) else { return }
+        if win.isMiniaturized { win.deminiaturize(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
+        return
+    }
     activationGeneration += 1
     let gen = activationGeneration
     let app = w.app
@@ -602,6 +626,11 @@ final class Switcher {
         guard visible, windows.indices.contains(i) else { return }
         let w = windows[i]
         dlog("close \(w.app.localizedName ?? "?") #\(w.id) / \(w.title)")
+        if w.pid == getpid() {   // AllTab's own window
+            NSApp.window(withWindowNumber: Int(w.id))?.performClose(nil)
+            drop([w.id], recheckAfter: 0.3)
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             if !axClose(w) { DispatchQueue.main.async { NSSound.beep() } }
         }
@@ -1029,7 +1058,8 @@ final class SettingsWindow: NSWindowController {
     private let stylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let loginCheck = NSButton(checkboxWithTitle: L.t("Launch at login", "Girişte otomatik başlat"), target: nil, action: nil)
     private let awakeCheck = NSButton(checkboxWithTitle: L.t("Keep awake (display never sleeps, lid close still sleeps)", "Uyku engelle (ekran uyumasın, kapak kapanınca uyur)"), target: nil, action: nil)
-    private let dockCheck = NSButton(checkboxWithTitle: L.t("Show an app's windows when the mouse is on its Dock icon", "Dock'ta simgenin üzerine gelince uygulamanın pencerelerini göster"), target: nil, action: nil)
+    private let dockCheck = NSButton(checkboxWithTitle: L.t("Show an app's windows on its Dock icon", "Dock simgesinin üzerine gelince pencereleri göster"), target: nil, action: nil)
+    private var permNote: NSTextField?
     private let swipeCheck = NSButton(checkboxWithTitle: L.t("Two-finger swipe in Finder: right = Back, left = Forward", "Finder'da iki parmak kaydırma: sağa = Geri, sola = İleri"), target: nil, action: nil)
     private let updateCheck = NSButton(checkboxWithTitle: L.t("Check for updates automatically", "Güncellemeleri otomatik denetle"), target: nil, action: nil)
     private let shotCheck = NSButton(checkboxWithTitle: L.t("Enable screenshot tool", "Ekran görüntüsü aracını kullan"), target: nil, action: nil)
@@ -1044,7 +1074,7 @@ final class SettingsWindow: NSWindowController {
 
     init(app: AppDelegate) {
         self.app = app
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 10),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 10),
                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = L.t("AllTab Settings", "AllTab Ayarları")
         w.isReleasedWhenClosed = false
@@ -1119,53 +1149,69 @@ final class SettingsWindow: NSWindowController {
                                          NSButton(title: L.t("Quit", "Çıkış"), target: NSApp, action: #selector(NSApplication.terminate(_:)))])
         footer.orientation = .horizontal; footer.spacing = 8
 
-        let rows: [NSView] = [
+        let permHelp = note(L.t("If AllTab is missing from the list, add /Applications/AllTab.app with + and turn it on. AllTab restarts itself when needed after a permission is granted.",
+                                "Ayar sayfasında listede AllTab yoksa + ile /Applications/AllTab.app'ı ekle ve anahtarı aç. İzin verildiğinde uygulama gerekirse kendini yeniden başlatır."))
+        permNote = permHelp   // only shown while a permission is missing
+
+        // Two columns side by side, so the whole window fits on a laptop screen without scrolling
+        let left: [NSView] = [
             section(L.t("Shortcut", "Kısayol")), hkRow, styleRow,
-            note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys work too, and a click opens a window. Release to switch, Esc cancels.",
-                     "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları da çalışır, tıklayınca pencere açılır. Bırakınca seçili pencereye geçer, Esc iptal.")),
-            note(L.t("While the list is open, W or the × button closes the window.",
-                     "Liste açıkken W ya da × düğmesi pencereyi kapatır.")),
+            note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back, arrow keys work too. A click opens a window, W or × closes it. Release to switch, Esc cancels.",
+                     "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları da çalışır. Tıklayınca pencere açılır, W ya da × kapatır. Bırakınca seçili pencereye geçer, Esc iptal.")),
             separator(),
             section(L.t("Permissions", "İzinler")),
             permRow(axStatus, L.t("Accessibility", "Erişilebilirlik"), L.t("Required to capture the shortcut and bring windows to front.", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu."), axButton, #selector(openAX)),
             permRow(scStatus, L.t("Screen Recording", "Ekran Kaydı"), L.t("For window thumbnails and the screenshot tool. Without it, app icons are shown.", "Pencerelerin küçük resimleri ve ekran görüntüsü için. Verilmezse simge gösterilir."), scButton, #selector(openSC)),
-            note(L.t("If AllTab is missing from the list, add /Applications/AllTab.app with + and turn it on. AllTab restarts itself when needed after a permission is granted.",
-                     "Ayar sayfasında listede AllTab yoksa + ile /Applications/AllTab.app'ı ekle ve anahtarı aç. İzin verildiğinde uygulama gerekirse kendini yeniden başlatır.")),
-            separator(),
-            section(L.t("Screenshot", "Ekran Görüntüsü")), shotCheck, shotRow,
-            note(L.t("Press the shortcut to freeze the screen, drag to select an area, mark it with a red rectangle / arrow / pen. To move the selection use the Move tool (4), hold Space while dragging, or the arrow keys. ⌘C copies (then ⌘V anywhere), ⌘S saves, ⌘Z undoes, Esc cancels.",
-                     "Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. Seçimi taşımak için Taşı aracı (4), Space basılı sürükleme ya da ok tuşları. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal.")),
+            permHelp,
             separator(),
             section(L.t("Dock", "Dock")), dockCheck,
             note(L.t("Hidden, minimized and other-desktop windows are listed too. Click one to open it, × closes it.",
                      "Gizli, simge durumundaki ve başka masaüstündeki pencereler de listelenir. Tıklayınca pencere açılır, × kapatır.")),
+        ]
+        let right: [NSView] = [
+            section(L.t("Screenshot", "Ekran Görüntüsü")), shotCheck, shotRow,
+            note(L.t("Press the shortcut to freeze the screen, drag to select an area, mark it with a red rectangle / arrow / pen. To move the selection use the Move tool (4), hold Space while dragging, or the arrow keys. ⌘C copies (then ⌘V anywhere), ⌘S saves, ⌘Z undoes, Esc cancels.",
+                     "Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. Seçimi taşımak için Taşı aracı (4), Space basılı sürükleme ya da ok tuşları. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal.")),
             separator(),
             section(L.t("Finder", "Finder")), swipeCheck,
             note(L.t("Swipe with two fingers in a Finder window, like in Chrome. Uses Finder's own Back / Forward commands.",
                      "Finder penceresinde iki parmakla kaydır, Chrome'daki gibi. Finder'ın kendi Geri / İleri komutunu kullanır.")),
             separator(),
             section(L.t("General", "Genel")), loginCheck, awakeCheck, updateRow,
-            separator(),
-            footer,
         ]
-        let stack = NSStackView(views: rows)
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 16, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        for v in rows { stack.setCustomSpacing(v is NSBox ? 12 : 8, after: v) }
-        for v in rows where v is NSBox || v is NSStackView || (v as? NSTextField)?.font?.pointSize == 11 {
-            v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
+        let colW: CGFloat = 400
+        func column(_ rows: [NSView]) -> NSStackView {
+            let st = NSStackView(views: rows)
+            st.orientation = .vertical
+            st.alignment = .leading
+            st.spacing = 8
+            for v in rows { st.setCustomSpacing(v is NSBox ? 12 : 8, after: v) }
+            for v in rows where v is NSBox || v is NSStackView || (v as? NSTextField)?.font?.pointSize == 11 {
+                v.widthAnchor.constraint(equalToConstant: colW).isActive = true
+            }
+            st.widthAnchor.constraint(equalToConstant: colW).isActive = true
+            return st
         }
+        let columns = NSStackView(views: [column(left), column(right)])
+        columns.orientation = .horizontal
+        columns.alignment = .top
+        columns.spacing = 36
+        let bottomLine = separator()
+        let outer = NSStackView(views: [columns, bottomLine, footer])
+        outer.orientation = .vertical
+        outer.alignment = .leading
+        outer.spacing = 12
+        outer.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 16, right: 24)
+        outer.translatesAutoresizingMaskIntoConstraints = false
+        bottomLine.widthAnchor.constraint(equalTo: columns.widthAnchor).isActive = true
+        footer.widthAnchor.constraint(equalTo: columns.widthAnchor).isActive = true
         let content = NSView()
-        content.addSubview(stack)
+        content.addSubview(outer)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            stack.widthAnchor.constraint(equalToConstant: 460),
+            outer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            outer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            outer.topAnchor.constraint(equalTo: content.topAnchor),
+            outer.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window?.contentView = content
     }
@@ -1241,6 +1287,7 @@ final class SettingsWindow: NSWindowController {
         scButton.title = sc ? L.t("Granted", "Verildi") : L.t("Open Settings", "Ayarı Aç")
         axButton.isEnabled = !ax
         scButton.isEnabled = !sc
+        permNote?.isHidden = ax && sc
     }
 
     @objc private func styleChanged() {
