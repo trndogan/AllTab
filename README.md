@@ -10,7 +10,10 @@ Built because AltTab and DockDoor felt heavy and kept pushing premium features. 
 - Hold the modifier, **Tab** forward, **Shift+Tab** back, arrow keys and mouse work too. Release to switch, **Esc** to cancel.
 - **Per-window** list (not per-app), most recently used first. A quick Cmd+Tab returns to the previous window.
 - **Hidden (Cmd+H)**, **minimized** and **other-desktop** windows are listed with a badge. Selecting one unhides, restores or switches Space as needed.
-- **Close without switching**: while the list is open, **W** or the **×** button (top right of a cell) closes that window, **Q** or the **⏻ Quit** button (bottom right) quits its app. The two buttons sit in opposite corners, so closing a window never quits the whole app by accident. The list stays open, so you can clean up several windows in one go. Apps still ask before discarding unsaved changes.
+- **Two layouts** (Settings ▸ Layout): side by side with thumbnails (default), or a plain vertical list with one row per window (icon, title, ×). The list grows a second column only when the windows do not fit on the screen.
+- **Close without switching**: while the list is open, **W** or the **×** button (top right of a cell) closes that window. The list stays open, so you can clean up several windows in one go. Apps still ask before discarding unsaved changes.
+- **Dock preview**: hover over a running app's icon in the Dock and its windows (hidden, minimized and other-desktop ones too) appear above the icon with thumbnails. Click one to open it, × closes it. Off by default, turn it on in Settings.
+- **Works with Secure Keyboard Entry**: when another app locks the keyboard (a password field in Chrome, a passcode screen, Terminal's Secure Keyboard Entry), macOS hides keystrokes from event taps. AllTab registers its shortcuts a second way that macOS still delivers then, so Cmd+Tab and the screenshot shortcut keep working.
 - Thumbnails are captured only while the panel is open (ScreenCaptureKit). Without Screen Recording permission, app icons are shown instead.
 - Opens on top of full-screen apps, on the screen where the mouse is.
 - **Screenshot tool** (default **⌘Ğ** on Turkish keyboards, ⌘[ elsewhere; change it in Settings or turn it off): freeze the screen, drag to select, mark with a red **rectangle / arrow / pen**. **⌘C** copies (then ⌘V anywhere), **⌘S** saves, **⌘Z** undoes, **Esc** cancels. Move the selected area (marks move with it) with the **✥ Move** tool (**4**), by holding **Space** while dragging, or with the arrow keys (Shift = 10 px). Output is a PNG at native pixel resolution.
@@ -49,9 +52,8 @@ If you have an Apple Developer account, install your certificate once (Xcode →
 | Cmd+Tab (hold) | Open the switcher, move to the next window |
 | Cmd+Shift+Tab | Previous window |
 | ← → ↑ ↓ | Move around the grid |
-| Mouse | Click a window to switch, its × to close it, its ⏻ Quit to quit the app |
+| Mouse | Click a window to switch, its × to close it |
 | W | Close the selected window |
-| Q | Quit the selected window's app |
 | Release Cmd / Enter | Switch to the selected window |
 | Esc | Cancel |
 
@@ -62,7 +64,8 @@ Menu bar icon: **Settings…**, **Take Screenshot**, **Keep Awake**, **Quit**.
 ## How it works
 
 - Windows come from `CGWindowListCopyWindowInfo`, keeping only layer-0 windows of regular apps larger than 100×50. Off-screen windows get their minimized state and title via Accessibility; untitled helper windows are dropped.
-- The shortcut is captured with a `CGEvent` tap (Accessibility permission). While the panel is open, keys are swallowed; releasing the modifier switches.
+- The shortcut is captured with a `CGEvent` tap (Accessibility permission). While the panel is open, keys are swallowed; releasing the modifier switches. The same shortcuts are also registered with `RegisterEventHotKey`, which still fires under Secure Keyboard Entry; with Cmd+Tab, macOS's own Cmd+Tab is turned off while AllTab runs (`CGSSetSymbolicHotKeyEnabled`) and turned back on when it quits.
+- The Dock preview listens to the Dock's own Accessibility notification for the icon under the mouse (`kAXSelectedChildrenChanged`), so nothing polls.
 - Windows are brought to front with `AXRaise` plus SkyLight `_SLPSSetFrontProcessWithOptions`, the same approach AltTab and yabai use. AllTab never activates itself, otherwise macOS would hand focus back to the previous app. For windows on another Space the raise is repeated once after the Space switch, guarded by a generation counter so rapid successive switches never undo each other.
 - Thumbnails are taken per window with `SCScreenshotManager`, asynchronously, only while the panel is open; results arriving after it closes are discarded.
 - MRU order is tracked through `NSWorkspace` activation notifications and an `AXObserver` on the active app. No timers.
@@ -73,6 +76,8 @@ Menu bar icon: **Settings…**, **Take Screenshot**, **Keep Awake**, **Quit**.
 
 - `main.swift` – switcher, settings, menu
 - `Screenshot.swift` – screenshot tool
+- `Keys.swift` – backup shortcuts that work under Secure Keyboard Entry
+- `DockPreview.swift` – window preview on Dock icons
 - `Gestures.swift` – two-finger swipe navigation in Finder
 - `Updater.swift` – update check, download, verification, swap
 - `build.sh` – build and install
@@ -88,4 +93,4 @@ MIT
 
 ### Türkçe
 
-macOS için Windows tarzı Alt+Tab (varsayılan Cmd+Tab) pencere değiştirici. Gizli, simge durumundaki ve başka masaüstündeki pencereler dahil **tüm** pencereleri küçük resimleriyle listeler, tuşu bırakınca geçer. Liste açıkken W ya da × düğmesi pencereyi kapatır, Q ya da Çık düğmesi uygulamadan çıkar. Yanında Lightshot tarzı ekran görüntüsü aracı (⌘Ğ, alan seç, kırmızı çerçeve/ok/kalem, ⌘C kopyala, ⌘S kaydet) ve uyku engelleme var. Kurulum: `./make-cert.sh` (bir kez) ve `./build.sh install`, ardından açılan ayarlar penceresinden Erişilebilirlik ve Ekran Kaydı izinlerini ver. Sistem dili Türkçeyse arayüz Türkçedir.
+macOS için Windows tarzı Alt+Tab (varsayılan Cmd+Tab) pencere değiştirici. Gizli, simge durumundaki ve başka masaüstündeki pencereler dahil **tüm** pencereleri küçük resimleriyle listeler, tuşu bırakınca geçer. Ayarlar'dan yan yana küçük resimli ya da sade dikey liste görünümü seçilebilir. Liste açıkken W ya da × düğmesi pencereyi kapatır. Ayarlar'dan açılırsa, Dock'ta bir uygulamanın simgesinin üzerine gelince açık pencereleri küçük resimleriyle listelenir. Başka bir uygulama klavyeyi kilitlese de (Chrome'da şifre alanı gibi) kısayollar çalışmaya devam eder. Yanında Lightshot tarzı ekran görüntüsü aracı (⌘Ğ, alan seç, kırmızı çerçeve/ok/kalem, ⌘C kopyala, ⌘S kaydet) ve uyku engelleme var. Kurulum: `./make-cert.sh` (bir kez) ve `./build.sh install`, ardından açılan ayarlar penceresinden Erişilebilirlik ve Ekran Kaydı izinlerini ver. Sistem dili Türkçeyse arayüz Türkçedir.

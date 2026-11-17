@@ -126,8 +126,6 @@ struct WindowInfo {
     var ax: AXUIElement?
 
     var label: String { title.isEmpty ? (app.localizedName ?? "") : title }
-    /// Finder cannot be quit (macOS relaunches it at once), so it gets no Quit button and Q beeps.
-    var canQuit: Bool { app.bundleIdentifier != "com.apple.finder" }
     var state: String? {
         if minimized { return L.t("minimized", "simge durumunda") }
         if app.isHidden { return L.t("hidden", "gizli") }
@@ -314,15 +312,21 @@ final class GridView: NSView {
     weak var switcher: Switcher?
     var cols = 1
     var cell = CGSize(width: 232, height: 176)
-    let gap: CGFloat = 10
-    let pad: CGFloat = 16
+    var gap: CGFloat = 10
+    var pad: CGFloat = 16
+    /// Vertical list: one row per window (icon, title, ×), no thumbnails. Filled top to bottom, then the
+    /// next column only when there are more windows than fit on the screen.
+    var list = false
+    var rowsPerCol = 1
 
     override var isFlipped: Bool { true }
 
     func rect(_ i: Int) -> CGRect {
-        CGRect(x: pad + CGFloat(i % cols) * (cell.width + gap),
-               y: pad + CGFloat(i / cols) * (cell.height + gap),
-               width: cell.width, height: cell.height)
+        let col = list ? i / rowsPerCol : i % cols
+        let row = list ? i % rowsPerCol : i / cols
+        return CGRect(x: pad + CGFloat(col) * (cell.width + gap),
+                      y: pad + CGFloat(row) * (cell.height + gap),
+                      width: cell.width, height: cell.height)
     }
 
     func index(at p: CGPoint) -> Int? {
@@ -331,10 +335,8 @@ final class GridView: NSView {
     }
 
     // The mouse position never changes the selection, only a click opens a window.
-    // Hover is tracked for the two buttons drawn on the selected cell and the one under the mouse:
-    // × (close the window) in the top right corner, Quit (quit the app) in the bottom right corner.
-    // They sit in opposite corners so closing a window never quits the whole app by accident.
-    private enum Part { case cell, close, quit }
+    // Hover is tracked for one thing: the × (close) button on the selected cell and the one under the mouse.
+    private enum Part { case cell, close }
     private(set) var hover: Int?
     private var hoverPart = Part.cell
 
@@ -345,38 +347,26 @@ final class GridView: NSView {
         .font: NSFont.systemFont(ofSize: 12.5, weight: .medium), .foregroundColor: NSColor.white, .paragraphStyle: para]
     private static let stateAttrs: [NSAttributedString.Key: Any] = [
         .font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.white.withAlphaComponent(0.7), .paragraphStyle: para]
-    private static let quitAttrs: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.white]
-    private static let quitText = L.t("Quit", "Çık")
-    private static let quitIcon = NSImage(systemSymbolName: "power", accessibilityDescription: nil)?
-        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [.white])))
+    // Vertical list: window title on top, app name under it
+    private static let rowTitleAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 13.5, weight: .semibold), .foregroundColor: NSColor.white, .paragraphStyle: para]
+    private static let rowAppAttrs: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11.5), .foregroundColor: NSColor.white.withAlphaComponent(0.55), .paragraphStyle: para]
 
-    /// × button in the top right corner of a cell.
+    /// × button in the top right corner of a cell (list: at the right end of the row).
     func closeRect(_ i: Int) -> CGRect {
         let r = rect(i)
-        return CGRect(x: r.maxX - 27, y: r.minY + 7, width: 19, height: 19)
+        return CGRect(x: r.maxX - (list ? 33 : 27), y: list ? r.midY - 9.5 : r.minY + 7, width: 19, height: 19)
     }
     private func onClose(_ p: CGPoint, _ i: Int) -> Bool { closeRect(i).insetBy(dx: -4, dy: -4).contains(p) }
 
-    /// State badge (hidden / minimized / other desktop) in the bottom left corner.
+    /// State badge (hidden / minimized / other desktop) in the bottom left corner (list: left of the ×).
     private func badgeRect(_ i: Int, _ text: String) -> CGRect {
         let r = rect(i)
         let size = (text as NSString).size(withAttributes: Self.stateAttrs)
+        if list { return CGRect(x: r.maxX - 44 - (size.width + 12), y: r.midY - 8.5, width: size.width + 12, height: 17) }
         return CGRect(x: r.minX + 10, y: r.maxY - 18, width: size.width + 10, height: 15)
     }
-
-    /// Quit button in the bottom right corner, icon only when the label would run into the badge. None for Finder.
-    func quitRect(_ i: Int) -> (rect: CGRect, label: Bool)? {
-        guard let s = switcher, s.windows.indices.contains(i), s.windows[i].canQuit else { return nil }
-        let r = rect(i)
-        let full = 30 + (Self.quitText as NSString).size(withAttributes: Self.quitAttrs).width
-        let left = s.windows[i].state.map { badgeRect(i, $0).maxX + 6 } ?? r.minX + 10
-        let label = r.maxX - 10 - full >= left
-        let w: CGFloat = label ? full : 24
-        return (CGRect(x: r.maxX - 10 - w, y: r.maxY - 20, width: w, height: 18), label)
-    }
-    private func onQuit(_ p: CGPoint, _ i: Int) -> Bool { quitRect(i)?.rect.insetBy(dx: -3, dy: -3).contains(p) ?? false }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -386,13 +376,13 @@ final class GridView: NSView {
     }
     override func mouseMoved(with e: NSEvent) { setHover(convert(e.locationInWindow, from: nil)) }
     override func mouseEntered(with e: NSEvent) { setHover(convert(e.locationInWindow, from: nil)) }
-    override func mouseExited(with e: NSEvent) { setHover(nil) }
+    override func mouseExited(with e: NSEvent) { setHover(nil); switcher?.onMouseLeft?() }
 
     private func setHover(_ p: CGPoint?) {
         var h: Int?, part = Part.cell
         if let p, let i = index(at: p) {
             h = i
-            part = onClose(p, i) ? .close : onQuit(p, i) ? .quit : .cell
+            part = onClose(p, i) ? .close : .cell
         }
         guard h != hover || part != hoverPart else { return }
         hover = h; hoverPart = part
@@ -408,7 +398,6 @@ final class GridView: NSView {
         let p = convert(e.locationInWindow, from: nil)
         guard let s = switcher, let i = index(at: p) else { return }
         if onClose(p, i) { s.closeWindow(at: i); return }
-        if onQuit(p, i) { s.quitApp(at: i); return }
         s.selected = i
         s.commit()
     }
@@ -418,34 +407,44 @@ final class GridView: NSView {
 
         for (i, w) in s.windows.enumerated() {
             let r = rect(i)
-            let path = NSBezierPath(roundedRect: r, xRadius: 8, yRadius: 8)
+            let radius: CGFloat = list ? 10 : 8
+            let path = NSBezierPath(roundedRect: list ? r.insetBy(dx: 0.75, dy: 0.75) : r, xRadius: radius, yRadius: radius)
             if i == s.selected {
-                NSColor.white.withAlphaComponent(0.2).setFill(); path.fill()
-                NSColor.white.withAlphaComponent(0.85).setStroke(); path.lineWidth = 1.5; path.stroke()
-            } else {
-                NSColor.white.withAlphaComponent(0.06).setFill(); path.fill()
+                NSColor.white.withAlphaComponent(list ? 0.17 : 0.2).setFill(); path.fill()
+                NSColor.white.withAlphaComponent(list ? 0.5 : 0.85).setStroke(); path.lineWidth = list ? 1 : 1.5; path.stroke()
+            } else if !list || i == hover {
+                NSColor.white.withAlphaComponent(list ? 0.07 : 0.06).setFill(); path.fill()
+            }
+            let icon = w.app.icon
+            let closable = i == s.selected || i == hover
+
+            // Dikey liste satırı: simge, pencere adı ve altında uygulama adı, durum rozeti, ×
+            if list {
+                let iconSize = min(32, r.height - 12)
+                icon?.draw(in: CGRect(x: r.minX + 12, y: r.midY - iconSize / 2, width: iconSize, height: iconSize), from: .zero,
+                           operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                let textX = r.minX + 12 + iconSize + 12
+                var right = r.maxX - 44
+                if let st = w.state { let b = badgeRect(i, st); drawBadge(b, st); right = b.minX - 10 }
+                let appName = w.app.localizedName ?? ""
+                // Two lines when the row is tall enough and the title is not just the app name
+                if r.height >= 42, !w.title.isEmpty, w.title != appName {
+                    (w.title as NSString).draw(in: CGRect(x: textX, y: r.midY - 17, width: right - textX, height: 18), withAttributes: Self.rowTitleAttrs)
+                    (appName as NSString).draw(in: CGRect(x: textX, y: r.midY + 2, width: right - textX, height: 15), withAttributes: Self.rowAppAttrs)
+                } else {
+                    (w.label as NSString).draw(in: CGRect(x: textX, y: r.midY - 9, width: right - textX, height: 18), withAttributes: Self.rowTitleAttrs)
+                }
+                if closable { drawClose(i) }
+                continue
             }
 
             // Başlık satırı: simge + başlık
-            let icon = w.app.icon
             icon?.draw(in: CGRect(x: r.minX + 10, y: r.minY + 9, width: 16, height: 16), from: .zero,
                        operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            let closable = i == s.selected || i == hover
             (w.label as NSString).draw(in: CGRect(x: r.minX + 31, y: r.minY + 8, width: r.width - (closable ? 64 : 41), height: 18), withAttributes: Self.titleAttrs)
 
             // Kapat düğmesi (×): seçili hücrede ve farenin altındaki hücrede
-            if closable {
-                let c = closeRect(i)
-                let hot = hoverPart == .close && i == hover
-                (hot ? NSColor.systemRed : NSColor.black.withAlphaComponent(0.45)).setFill()
-                NSBezierPath(ovalIn: c).fill()
-                let m = c.insetBy(dx: 6.5, dy: 6.5)
-                let x = NSBezierPath()
-                x.move(to: CGPoint(x: m.minX, y: m.minY)); x.line(to: CGPoint(x: m.maxX, y: m.maxY))
-                x.move(to: CGPoint(x: m.maxX, y: m.minY)); x.line(to: CGPoint(x: m.minX, y: m.maxY))
-                x.lineWidth = 1.5; x.lineCapStyle = .round
-                NSColor.white.withAlphaComponent(hot ? 1 : 0.85).setStroke(); x.stroke()
-            }
+            if closable { drawClose(i) }
 
             // Küçük resim alanı
             let area = CGRect(x: r.minX + 10, y: r.minY + 32, width: r.width - 20, height: r.height - 44)
@@ -464,41 +463,38 @@ final class GridView: NSView {
             }
 
             // Durum rozeti (gizli / simge durumunda / başka masaüstü)
-            let quit = closable ? quitRect(i) : nil
-            if let st = w.state {
-                var badge = badgeRect(i, st)
-                // Narrow cell: the badge gives way to the Quit button, its text is cut short
-                if let q = quit { badge.size.width = min(badge.width, q.rect.minX - 6 - badge.minX) }
-                NSColor.black.withAlphaComponent(0.5).setFill()
-                NSBezierPath(roundedRect: badge, xRadius: 4, yRadius: 4).fill()
-                (st as NSString).draw(in: badge.insetBy(dx: 5, dy: 0).offsetBy(dx: 0, dy: 1), withAttributes: Self.stateAttrs)
-            }
-
-            // Uygulamadan çık düğmesi: ×'in karşı köşesinde, aynı hücrelerde
-            if let q = quit {
-                let hot = hoverPart == .quit && i == hover
-                (hot ? NSColor.systemRed : NSColor.black.withAlphaComponent(0.55)).setFill()
-                NSBezierPath(roundedRect: q.rect, xRadius: 9, yRadius: 9).fill()
-                if let img = Self.quitIcon {
-                    let h: CGFloat = 11, iw = h * img.size.width / max(img.size.height, 1)
-                    let x = q.label ? q.rect.minX + 8 : q.rect.midX - iw / 2
-                    img.draw(in: CGRect(x: x, y: q.rect.midY - h / 2, width: iw, height: h), from: .zero,
-                             operation: .sourceOver, fraction: hot ? 1 : 0.9, respectFlipped: true, hints: nil)
-                }
-                if q.label {
-                    let t = Self.quitText as NSString
-                    let ts = t.size(withAttributes: Self.quitAttrs)
-                    t.draw(at: CGPoint(x: q.rect.minX + 23, y: q.rect.midY - ts.height / 2), withAttributes: Self.quitAttrs)
-                }
-            }
+            if let st = w.state { drawBadge(badgeRect(i, st), st) }
         }
+    }
+
+    private func drawBadge(_ badge: CGRect, _ text: String) {
+        NSColor.black.withAlphaComponent(list ? 0.35 : 0.5).setFill()
+        let radius = list ? badge.height / 2 : 4
+        NSBezierPath(roundedRect: badge, xRadius: radius, yRadius: radius).fill()
+        (text as NSString).draw(in: badge.insetBy(dx: list ? 6 : 5, dy: 0).offsetBy(dx: 0, dy: list ? 1.5 : 1), withAttributes: Self.stateAttrs)
+    }
+
+    private func drawClose(_ i: Int) {
+        let c = closeRect(i)
+        let hot = hoverPart == .close && i == hover
+        (hot ? NSColor.systemRed : NSColor.black.withAlphaComponent(0.45)).setFill()
+        NSBezierPath(ovalIn: c).fill()
+        let m = c.insetBy(dx: 6.5, dy: 6.5)
+        let x = NSBezierPath()
+        x.move(to: CGPoint(x: m.minX, y: m.minY)); x.line(to: CGPoint(x: m.maxX, y: m.maxY))
+        x.move(to: CGPoint(x: m.maxX, y: m.minY)); x.line(to: CGPoint(x: m.minX, y: m.maxY))
+        x.lineWidth = 1.5; x.lineCapStyle = .round
+        NSColor.white.withAlphaComponent(hot ? 1 : 0.85).setStroke(); x.stroke()
     }
 }
 
 // MARK: - Değiştirici
 
 final class Switcher {
-    let tracker = FocusTracker()
+    /// .switcher: the Alt-Tab list in the middle of the screen. .dock: one app's windows above its Dock icon.
+    enum Mode { case switcher, dock }
+    let mode: Mode
+    let tracker: FocusTracker
     let panel: NSPanel
     let grid = GridView()
     var windows: [WindowInfo] = []
@@ -512,8 +508,19 @@ final class Switcher {
     private var shownOrder: [CGWindowID: Int] = [:]
     /// Kapatılması istenen pencereler ve gizli tutulacakları son an (kapanmazsa listeye geri döner)
     private var closing: [CGWindowID: Date] = [:]
+    /// Dock mode: the app whose windows are listed and its Dock icon (Cocoa screen coordinates)
+    private(set) var dockApp: NSRunningApplication?
+    private var anchor: CGRect = .zero
+    /// Called with true when the panel opens, false when it closes
+    var onVisibility: [(Bool) -> Void] = []
+    /// The mouse left the cells (Dock mode closes the preview then)
+    var onMouseLeft: (() -> Void)?
+    /// Switcher mode: watches the modifier while the panel is open, in case its release never reaches the tap
+    private var releaseWatch: Timer?
 
-    init() {
+    init(mode: Mode = .switcher, tracker: FocusTracker? = nil) {
+        self.mode = mode
+        self.tracker = tracker ?? FocusTracker()
         panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)))
         panel.isOpaque = false
@@ -541,26 +548,52 @@ final class Switcher {
         panel.contentView = effect
     }
 
-    var cols: Int { grid.cols }
+    /// Arrow keys: ↑↓ move one row, ←→ one column (grid: across, list: to the next column of rows)
+    var rowStep: Int { grid.list ? 1 : grid.cols }
+    var colStep: Int { grid.list ? grid.rowsPerCol : 1 }
 
     func show() {
-        windows = WindowList.fetch(mru: tracker.mru)
-        guard !windows.isEmpty else { return }
+        let list = WindowList.fetch(mru: tracker.mru)
+        guard !list.isEmpty else { return }
+        present(list, selected: list.count > 1 ? 1 : 0)
+        // The modifier's release normally arrives as a flagsChanged event; when another app's Secure Keyboard
+        // Entry hides it from the tap, this still notices the release and switches.
+        releaseWatch?.invalidate()
+        releaseWatch = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, self.visible, !self.holdOpen else { return }
+            if !CGEventSource.flagsState(.combinedSessionState).contains(Hotkey.current.flag) { self.commit() }
+        }
+    }
+
+    /// Dock mode: lists the app's windows above its icon. Nothing is selected, the mouse picks.
+    func showDock(_ app: NSRunningApplication, anchor: CGRect) {
+        let list = WindowList.fetch(mru: tracker.mru).filter { $0.pid == app.processIdentifier }
+        guard !list.isEmpty else { cancel(); return }
+        if visible, dockApp == app, self.anchor == anchor { return }
+        dockApp = app
+        self.anchor = anchor
+        present(list, selected: -1)
+    }
+
+    private func present(_ list: [WindowInfo], selected sel: Int) {
+        windows = list
         let ids = Set(windows.map { $0.id })
         thumbs = thumbs.filter { ids.contains($0.key) }
-        selected = windows.count > 1 ? 1 : 0
+        selected = sel
         shownOrder = Dictionary(windows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
         closing = [:]
         layout()
         grid.needsDisplay = true
         panel.orderFrontRegardless()
+        let wasVisible = visible
         visible = true
         generation += 1
         grid.syncHover()
         captureThumbs(generation)
+        if !wasVisible { onVisibility.forEach { $0(true) } }
     }
 
-    // MARK: Pencere kapatma / uygulamadan çıkma (panel açık kalır)
+    // MARK: Pencere kapatma (panel açık kalır)
 
     func closeSelectedWindow() { closeWindow(at: selected) }
 
@@ -573,18 +606,6 @@ final class Switcher {
             if !axClose(w) { DispatchQueue.main.async { NSSound.beep() } }
         }
         drop([w.id], recheckAfter: 1.2)
-    }
-
-    func quitSelectedApp() { quitApp(at: selected) }
-
-    /// Pencerenin uygulamasından çıkar (⌘Q gibi, uygulama kaydetmeyi sorabilir). Finder'dan çıkılmaz.
-    func quitApp(at i: Int) {
-        guard visible, windows.indices.contains(i) else { return }
-        guard windows[i].canQuit else { NSSound.beep(); return }
-        let app = windows[i].app
-        dlog("quit \(app.localizedName ?? "?")")
-        app.terminate()
-        drop(windows.filter { $0.pid == app.processIdentifier }.map { $0.id }, recheckAfter: 3)
     }
 
     func drop(_ ids: [CGWindowID], recheckAfter delay: TimeInterval) {
@@ -604,7 +625,8 @@ final class Switcher {
         let now = Date()
         closing = closing.filter { $0.value > now }
         let keep = windows.indices.contains(selected) ? windows[selected].id : nil
-        let fresh = WindowList.fetch(mru: tracker.mru).filter { closing[$0.id] == nil }
+        let fresh = WindowList.fetch(mru: tracker.mru)
+            .filter { closing[$0.id] == nil && (mode == .switcher || $0.pid == dockApp?.processIdentifier) }
         let last = shownOrder.count
         windows = fresh.enumerated().sorted {
             (shownOrder[$0.element.id] ?? last + $0.offset) < (shownOrder[$1.element.id] ?? last + $1.offset)
@@ -631,7 +653,7 @@ final class Switcher {
     func cancel() { hide() }
 
     func commit() {
-        guard visible, selected < windows.count else { hide(); return }
+        guard visible, windows.indices.contains(selected) else { hide(); return }
         let w = windows[selected]
         hide()
         dlog("commit secili=\(selected) \(w.app.localizedName ?? "?") / \(w.title)")
@@ -640,19 +662,27 @@ final class Switcher {
     }
 
     private func hide() {
+        releaseWatch?.invalidate(); releaseWatch = nil
+        let wasVisible = visible
         visible = false
+        dockApp = nil
         panel.orderOut(nil)
         generation += 1
+        if wasVisible { onVisibility.forEach { $0(false) } }
     }
 
-    /// Fare hangi ekrandaysa orada, ekrana sığacak şekilde hücre boyutunu ayarlar.
+    /// Alt-Tab: fare hangi ekrandaysa ortasında. Dock: simgenin hemen üstünde (yan Dock'ta yanında).
+    /// Hücre boyutu ekrana sığacak şekilde küçülür.
     private func layout() {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let point = mode == .dock ? CGPoint(x: anchor.midX, y: anchor.midY) : NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main ?? NSScreen.screens[0]
         let n = windows.count
+        let dock = mode == .dock
+        if !dock && SwitcherStyle.current == .list { layoutList(screen); return }
+        grid.list = false; grid.gap = 10; grid.pad = 16
         let pad = grid.pad, gap = grid.gap
-        let maxW = screen.visibleFrame.width * 0.92, maxH = screen.visibleFrame.height * 0.85
-        var cw: CGFloat = 232, ch: CGFloat = 176
+        let maxW = screen.visibleFrame.width * (dock ? 0.9 : 0.92), maxH = screen.visibleFrame.height * (dock ? 0.55 : 0.85)
+        var cw: CGFloat = dock ? 200 : 232, ch: CGFloat = dock ? 152 : 176
         var cols = 1, rows = 1
         func measure() {
             cols = max(1, min(n, Int((maxW - 2 * pad + gap) / (cw + gap))))
@@ -667,15 +697,52 @@ final class Switcher {
         let w = CGFloat(cols) * (cw + gap) - gap + 2 * pad
         let h = CGFloat(rows) * (ch + gap) - gap + 2 * pad
         let f = screen.frame
+        let frame = dock ? dockFrame(w, h, screen) : CGRect(x: f.midX - w / 2, y: f.midY - h / 2, width: w, height: h)
+        panel.setFrame(frame, display: false)
+        grid.frame = panel.contentView!.bounds
+    }
+
+    /// Vertical list in the middle of the screen: rows get a little shorter when there are many windows,
+    /// and a second column only appears when they still do not fit.
+    private func layoutList(_ screen: NSScreen) {
+        let n = windows.count
+        grid.list = true; grid.gap = 4; grid.pad = 12
+        let pad = grid.pad, gap = grid.gap
+        let v = screen.visibleFrame
+        let maxH = v.height * 0.85, maxW = v.width * 0.92
+        var rh: CGFloat = 52
+        func fit() -> Int { max(1, Int((maxH - 2 * pad + gap) / (rh + gap))) }
+        while n > fit(), rh > 34 { rh -= 2 }
+        let cols = Int(ceil(Double(n) / Double(fit())))
+        let perCol = Int(ceil(Double(n) / Double(cols)))
+        let cw = min(580, (maxW - 2 * pad - CGFloat(cols - 1) * gap) / CGFloat(cols))
+        grid.cols = cols; grid.rowsPerCol = perCol
+        grid.cell = CGSize(width: cw, height: rh)
+        let w = CGFloat(cols) * (cw + gap) - gap + 2 * pad
+        let h = CGFloat(perCol) * (rh + gap) - gap + 2 * pad
+        let f = screen.frame
         panel.setFrame(CGRect(x: f.midX - w / 2, y: f.midY - h / 2, width: w, height: h), display: false)
         grid.frame = panel.contentView!.bounds
+    }
+
+    /// Next to the Dock icon, on the side away from the screen edge the Dock sits on, kept on screen.
+    private func dockFrame(_ w: CGFloat, _ h: CGFloat, _ screen: NSScreen) -> CGRect {
+        let f = screen.frame, v = screen.visibleFrame, a = anchor
+        func clampX(_ x: CGFloat) -> CGFloat { min(max(x, v.minX + 8), v.maxX - 8 - w) }
+        func clampY(_ y: CGFloat) -> CGFloat { min(max(y, v.minY + 8), v.maxY - 8 - h) }
+        let bottom = a.minY - f.minY, left = a.minX - f.minX, right = f.maxX - a.maxX
+        if bottom <= min(left, right) {
+            return CGRect(x: clampX(a.midX - w / 2), y: min(max(a.maxY, v.minY) + 6, v.maxY - 8 - h), width: w, height: h)
+        }
+        if left < right { return CGRect(x: max(a.maxX, v.minX) + 6, y: clampY(a.midY - h / 2), width: w, height: h) }
+        return CGRect(x: min(a.minX, v.maxX) - 6 - w, y: clampY(a.midY - h / 2), width: w, height: h)
     }
 
     /// Küçük resimler yalnızca panel açıkken ve eşzamansız çekilir, gelmeyenler simge olarak kalır.
     private func captureThumbs(_ gen: Int) {
         // Without Screen Recording, SCShareableContent makes macOS show its "record screen and audio" dialog
         // on every Cmd+Tab. Never touch ScreenCaptureKit unless the permission is already there.
-        guard Permissions.screenRecording else { return }
+        guard Permissions.screenRecording, !grid.list else { return }   // the list shows no thumbnails
         let targets = windows
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, _ in
             guard let content else { return }
@@ -719,6 +786,22 @@ enum Hotkey: String, CaseIterable {
     }
 }
 
+// MARK: - Görünüm
+
+enum SwitcherStyle: String, CaseIterable {
+    case grid, list
+    static var current: SwitcherStyle {
+        get { SwitcherStyle(rawValue: UserDefaults.standard.string(forKey: "style") ?? "") ?? .grid }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "style") }
+    }
+    var title: String {
+        switch self {
+        case .grid: return L.t("Side by side, with thumbnails", "Yan yana, küçük resimli")
+        case .list: return L.t("Vertical list, plain", "Dikey liste, sade")
+        }
+    }
+}
+
 // MARK: - Klavye yakalama (event tap)
 
 var onScreenshotHotkey: (() -> Void)?
@@ -730,6 +813,11 @@ final class HotkeyTap {
 
     init(_ s: Switcher) {
         switcher = s
+        registerBackup()
+        NotificationCenter.default.addObserver(forName: ShotHotkey.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.registerBackup()
+        }
+        s.onVisibility.append { [weak self] open in self?.switcherVisibility(open) }
         if !start() {
             // Uyarı çıkarma; izin verilene kadar 2 sn'de bir sessizce yeniden dene
             retry = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] t in
@@ -766,30 +854,32 @@ final class HotkeyTap {
         let key = event.getIntegerValueField(.keyboardEventKeycode)
         if ShotHotkey.recording { ShotHotkey.record(key, flags); return true }
         if ShotHotkey.enabled, !s.visible, ShotHotkey.matches(key, flags) {
+            CarbonKeys.tapHandledAt = ProcessInfo.processInfo.systemUptime
             DispatchQueue.main.async { onScreenshotHotkey?() }
             return true
         }
         let allMods: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl]
         let others = allMods.subtracting(hk.flag)
         if key == 48, mod, flags.intersection(others).isEmpty {          // Tab
+            CarbonKeys.tapHandledAt = ProcessInfo.processInfo.systemUptime
             if !s.visible { s.show() } else { s.step(flags.contains(.maskShift) ? -1 : 1) }
             return true
         }
         guard s.visible else { return false }
+        CarbonKeys.tapHandledAt = ProcessInfo.processInfo.systemUptime
         switch key {
         case 53: s.cancel()                 // Esc
         case 36, 76: s.commit()             // Return / Enter
-        case 123: s.step(-1)                // ←
-        case 124: s.step(1)                 // →
-        case 126: s.step(-s.cols)           // ↑
-        case 125: s.step(s.cols)            // ↓
+        case 123: s.step(-s.colStep)        // ←
+        case 124: s.step(s.colStep)         // →
+        case 126: s.step(-s.rowStep)        // ↑
+        case 125: s.step(s.rowStep)         // ↓
         default:
-            // W closes the selected window, Q quits its app. A held key never repeats the action,
+            // W closes the selected window. A held key never repeats the action,
             // and real keys never act on the debug hook's panel (holdOpen).
             guard !s.holdOpen, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else { break }
             switch letter(key) {
             case "W": s.closeSelectedWindow()
-            case "Q": s.quitSelectedApp()
             default: break
             }
         }
@@ -800,7 +890,7 @@ final class HotkeyTap {
     private func letter(_ key: Int64) -> String {
         let name = ShotHotkey.keyName(UInt16(key))
         if name.count == 1, name.unicodeScalars.allSatisfy({ $0.isASCII }) { return name }
-        return [12: "Q", 13: "W"][key] ?? ""
+        return key == 13 ? "W" : ""
     }
 }
 
@@ -936,8 +1026,10 @@ final class SettingsWindow: NSWindowController {
     private let axButton = NSButton(title: L.t("Open Settings", "Ayarı Aç"), target: nil, action: nil)
     private let scButton = NSButton(title: L.t("Open Settings", "Ayarı Aç"), target: nil, action: nil)
     private let hotkeyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let stylePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let loginCheck = NSButton(checkboxWithTitle: L.t("Launch at login", "Girişte otomatik başlat"), target: nil, action: nil)
     private let awakeCheck = NSButton(checkboxWithTitle: L.t("Keep awake (display never sleeps, lid close still sleeps)", "Uyku engelle (ekran uyumasın, kapak kapanınca uyur)"), target: nil, action: nil)
+    private let dockCheck = NSButton(checkboxWithTitle: L.t("Show an app's windows when the mouse is on its Dock icon", "Dock'ta simgenin üzerine gelince uygulamanın pencerelerini göster"), target: nil, action: nil)
     private let swipeCheck = NSButton(checkboxWithTitle: L.t("Two-finger swipe in Finder: right = Back, left = Forward", "Finder'da iki parmak kaydırma: sağa = Geri, sola = İleri"), target: nil, action: nil)
     private let updateCheck = NSButton(checkboxWithTitle: L.t("Check for updates automatically", "Güncellemeleri otomatik denetle"), target: nil, action: nil)
     private let shotCheck = NSButton(checkboxWithTitle: L.t("Enable screenshot tool", "Ekran görüntüsü aracını kullan"), target: nil, action: nil)
@@ -993,9 +1085,15 @@ final class SettingsWindow: NSWindowController {
             hotkeyPopup.lastItem?.representedObject = hk.rawValue
         }
         hotkeyPopup.target = self; hotkeyPopup.action = #selector(hotkeyChanged)
+        for st in SwitcherStyle.allCases {
+            stylePopup.addItem(withTitle: st.title)
+            stylePopup.lastItem?.representedObject = st.rawValue
+        }
+        stylePopup.target = self; stylePopup.action = #selector(styleChanged)
         loginCheck.target = self; loginCheck.action = #selector(loginChanged)
         awakeCheck.target = self; awakeCheck.action = #selector(awakeChanged)
         swipeCheck.target = self; swipeCheck.action = #selector(swipeChanged)
+        dockCheck.target = self; dockCheck.action = #selector(dockChanged)
         updateCheck.target = self; updateCheck.action = #selector(updateChanged)
         let updateNow = NSButton(title: L.t("Check Now", "Şimdi Denetle"), target: self, action: #selector(checkUpdateNow))
         let updateRow = NSStackView(views: [updateCheck, updateNow])
@@ -1003,6 +1101,8 @@ final class SettingsWindow: NSWindowController {
 
         let hkRow = NSStackView(views: [NSTextField(labelWithString: L.t("Switch windows:", "Pencere değiştir:")), hotkeyPopup])
         hkRow.orientation = .horizontal; hkRow.spacing = 8
+        let styleRow = NSStackView(views: [NSTextField(labelWithString: L.t("Layout:", "Görünüm:")), stylePopup])
+        styleRow.orientation = .horizontal; styleRow.spacing = 8
 
         shotCheck.target = self; shotCheck.action = #selector(shotChanged)
         shotKeyButton.target = self; shotKeyButton.action = #selector(recordShotKey)
@@ -1020,11 +1120,11 @@ final class SettingsWindow: NSWindowController {
         footer.orientation = .horizontal; footer.spacing = 8
 
         let rows: [NSView] = [
-            section(L.t("Shortcut", "Kısayol")), hkRow,
+            section(L.t("Shortcut", "Kısayol")), hkRow, styleRow,
             note(L.t("Hold the modifier and press Tab to move forward, Shift+Tab back; arrow keys work too, and a click opens a window. Release to switch, Esc cancels.",
                      "Tuşu basılı tutup Tab ile ilerle, Shift+Tab geri, ok tuşları da çalışır, tıklayınca pencere açılır. Bırakınca seçili pencereye geçer, Esc iptal.")),
-            note(L.t("While the list is open: W or the × button closes the window, Q or the Quit button quits its app.",
-                     "Liste açıkken W ya da × düğmesi pencereyi kapatır, Q ya da Çık düğmesi uygulamadan çıkar.")),
+            note(L.t("While the list is open, W or the × button closes the window.",
+                     "Liste açıkken W ya da × düğmesi pencereyi kapatır.")),
             separator(),
             section(L.t("Permissions", "İzinler")),
             permRow(axStatus, L.t("Accessibility", "Erişilebilirlik"), L.t("Required to capture the shortcut and bring windows to front.", "Kısayolu yakalamak ve pencereleri öne getirmek için zorunlu."), axButton, #selector(openAX)),
@@ -1035,6 +1135,10 @@ final class SettingsWindow: NSWindowController {
             section(L.t("Screenshot", "Ekran Görüntüsü")), shotCheck, shotRow,
             note(L.t("Press the shortcut to freeze the screen, drag to select an area, mark it with a red rectangle / arrow / pen. To move the selection use the Move tool (4), hold Space while dragging, or the arrow keys. ⌘C copies (then ⌘V anywhere), ⌘S saves, ⌘Z undoes, Esc cancels.",
                      "Kısayola basınca ekran dondurulur, sürükleyerek alan seç, kırmızı çerçeve / ok / kalem ile işaretle. Seçimi taşımak için Taşı aracı (4), Space basılı sürükleme ya da ok tuşları. ⌘C kopyalar (sonra ⌘V ile yapıştır), ⌘S kaydeder, ⌘Z geri alır, Esc iptal.")),
+            separator(),
+            section(L.t("Dock", "Dock")), dockCheck,
+            note(L.t("Hidden, minimized and other-desktop windows are listed too. Click one to open it, × closes it.",
+                     "Gizli, simge durumundaki ve başka masaüstündeki pencereler de listelenir. Tıklayınca pencere açılır, × kapatır.")),
             separator(),
             section(L.t("Finder", "Finder")), swipeCheck,
             note(L.t("Swipe with two fingers in a Finder window, like in Chrome. Uses Finder's own Back / Forward commands.",
@@ -1097,11 +1201,14 @@ final class SettingsWindow: NSWindowController {
     }
 
     private func load() {
+        let style = SwitcherStyle.current.rawValue
+        if let i = stylePopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == style }) { stylePopup.selectItem(at: i) }
         let cur = Hotkey.current.rawValue
         if let i = hotkeyPopup.itemArray.firstIndex(where: { ($0.representedObject as? String) == cur }) { hotkeyPopup.selectItem(at: i) }
         loginCheck.state = LoginItem.enabled ? .on : .off
         awakeCheck.state = KeepAwake.enabled ? .on : .off
         swipeCheck.state = SwipeNav.enabled ? .on : .off
+        dockCheck.state = DockPreview.enabled ? .on : .off
         updateCheck.state = Updater.autoCheck ? .on : .off
         loadShot()
         loadPermissions()
@@ -1114,7 +1221,10 @@ final class SettingsWindow: NSWindowController {
         shotKeyButton.isEnabled = ShotHotkey.enabled
     }
 
-    @objc private func shotChanged() { ShotHotkey.enabled = shotCheck.state == .on; loadShot() }
+    @objc private func shotChanged() {
+        ShotHotkey.enabled = shotCheck.state == .on
+        NotificationCenter.default.post(name: ShotHotkey.changed, object: nil)   // re-registers the backup shortcut
+    }
     @objc private func recordShotKey() {
         ShotHotkey.recording.toggle()
         loadShot()
@@ -1133,8 +1243,12 @@ final class SettingsWindow: NSWindowController {
         scButton.isEnabled = !sc
     }
 
+    @objc private func styleChanged() {
+        if let raw = stylePopup.selectedItem?.representedObject as? String, let st = SwitcherStyle(rawValue: raw) { SwitcherStyle.current = st }
+    }
     @objc private func hotkeyChanged() {
         if let raw = hotkeyPopup.selectedItem?.representedObject as? String, let hk = Hotkey(rawValue: raw) { Hotkey.current = hk }
+        app?.hotkey.registerBackup()
     }
     @objc private func loginChanged() {
         LoginItem.enabled = loginCheck.state == .on
@@ -1142,6 +1256,7 @@ final class SettingsWindow: NSWindowController {
     }
     @objc private func awakeChanged() { KeepAwake.enabled = awakeCheck.state == .on; app?.syncUI() }
     @objc private func swipeChanged() { SwipeNav.enabled = swipeCheck.state == .on }
+    @objc private func dockChanged() { DockPreview.enabled = dockCheck.state == .on; app?.dock.apply() }
     @objc private func updateChanged() { Updater.autoCheck = updateCheck.state == .on }
     @objc private func checkUpdateNow() { Updater.check(interactive: true) }
     @objc private func openAX() { Permissions.openAccessibility() }
@@ -1154,6 +1269,7 @@ final class SettingsWindow: NSWindowController {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var switcher: Switcher!
     var hotkey: HotkeyTap!
+    var dock: DockPreview!
     var status: NSStatusItem!
     var settings: SettingsWindow!
     let screenshot = ScreenshotTool()
@@ -1161,11 +1277,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let awakeItem = NSMenuItem(title: L.t("Keep Awake", "Uyku Engelle"), action: #selector(toggleAwake), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        if CommandLine.arguments.contains("--debug") { debugLog = true }
         switcher = Switcher()
         hotkey = HotkeyTap(switcher)
+        dock = DockPreview(tracker: switcher.tracker)
+        switcher.onVisibility.append { [weak self] open in if open { self?.dock.preview.cancel() } }
         settings = SettingsWindow(app: self)
         onScreenshotHotkey = { [weak self] in self?.screenshot.start() }
-        if CommandLine.arguments.contains("--debug") { debugLog = true; installDebugHooks() }
+        if debugLog { installDebugHooks() }
 
         // Screen Recording granted while we run: macOS wants a restart and its "Quit & Reopen" button is
         // unreliable, so poll with a fresh process (only while the permission is missing) and restart ourselves.
@@ -1243,6 +1362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// macOS's own "Quit & Reopen" button quits us but does not reliably reopen us. If a normal quit
     /// happens right after Screen Recording was granted, reopen ourselves.
     func applicationWillTerminate(_ n: Notification) {
+        SystemSwitcher.set(enabled: true)   // give macOS its own Cmd+Tab back
         guard launchedWithoutScreenRecording, !relaunching else { return }
         var granted = false
         let p = Process()
@@ -1278,11 +1398,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case let cmd? where cmd.hasPrefix("select:"):
                 if let i = s.windows.firstIndex(where: { ($0.app.localizedName ?? "").lowercased().contains(cmd.dropFirst(7).lowercased()) }) { s.selected = i; s.grid.needsDisplay = true }
                 dlog("liste: " + s.windows.enumerated().map { "\($0.offset):\($0.element.app.localizedName ?? "?")[\($0.element.state ?? "")]\($0.offset == s.selected ? "*" : "")" }.joined(separator: " "))
-            // close:/quit:/drop: yalnızca adı eşleşen uygulamaya dokunur, eşleşme yoksa hiçbir şey yapmaz
+            // close:/drop: yalnızca adı eşleşen uygulamaya dokunur, eşleşme yoksa hiçbir şey yapmaz
             case let cmd? where cmd.hasPrefix("close:"):
                 if let i = find(cmd.dropFirst(6)) { s.closeWindow(at: i) } else { dlog("close: eslesme yok") }
-            case let cmd? where cmd.hasPrefix("quit:"):
-                if let i = find(cmd.dropFirst(5)) { s.quitApp(at: i) } else { dlog("quit: eslesme yok") }
             case let cmd? where cmd.hasPrefix("drop:"):   // kapatmadan yalnızca listeden düşürür: geri dönüşü dener
                 if let i = find(cmd.dropFirst(5)) { s.drop([s.windows[i].id], recheckAfter: 1.2) } else { dlog("drop: eslesme yok") }
             case "list":
@@ -1301,6 +1419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             case "cancel": s.holdOpen = false; s.cancel()
             case "commit": s.holdOpen = false; s.commit()
+            case "dockinfo": dlog(self.dock.describe())   // yalnız okur, ekranda bir şey açmaz
             case "settings": self.openSettings()
             case "shot": self.screenshot.start()
             case "swipeback": SwipeNav.go(back: true)
