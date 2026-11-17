@@ -17,6 +17,11 @@ final class DockPreview {
     private var hovered: NSRunningApplication?
     private var pendingShow: DispatchWorkItem?
     private var pendingHide: DispatchWorkItem?
+    /// While the preview is open: the hovered icon and the whole Dock, for the mouse watch below
+    private var anchor: CGRect = .zero
+    private var dockArea: CGRect = .zero
+    private var watch: Timer?
+    private var outsideTicks = 0
 
     /// Off by default: turned on in Settings.
     static var enabled: Bool {
@@ -27,6 +32,7 @@ final class DockPreview {
     init(tracker: FocusTracker) {
         preview = Switcher(mode: .dock, tracker: tracker)
         preview.onMouseLeft = { [weak self] in self?.scheduleHide() }
+        preview.onVisibility.append { [weak self] open in if !open { self?.stopWatch() } }
         let ws = NSWorkspace.shared.notificationCenter
         // The Dock restarts (killall Dock, display changes): its Accessibility elements are new, attach again.
         ws.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
@@ -101,6 +107,10 @@ final class DockPreview {
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.hovered == app, Self.enabled else { return }
             self.preview.showDock(app, anchor: frame)
+            guard self.preview.visible else { return }
+            self.anchor = frame
+            self.dockArea = self.list.flatMap { Self.frame($0) } ?? frame
+            self.startWatch()
         }
         pendingShow?.cancel()
         pendingShow = work
@@ -119,6 +129,34 @@ final class DockPreview {
         }
         pendingHide = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
+    /// The Dock does not always report that the mouse left it (a quick flick off the Dock, the Dock hiding
+    /// itself), and then the preview stayed open. So while it is open the mouse is also checked a few times
+    /// a second: outside the preview, the Dock and the space between the icon and the preview for about
+    /// half a second, and it closes. Runs only while the preview is open.
+    private func startWatch() {
+        outsideTicks = 0
+        guard watch == nil else { return }
+        watch = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.preview.visible else { self.stopWatch(); return }
+            let m = NSEvent.mouseLocation
+            let p = self.preview.panel.frame
+            let safe = [p.insetBy(dx: -8, dy: -8), self.dockArea.insetBy(dx: -4, dy: -4), self.anchor.union(p)]
+            if safe.contains(where: { $0.contains(m) }) { self.outsideTicks = 0; return }
+            self.outsideTicks += 1
+            guard self.outsideTicks >= 3 else { return }
+            dlog("dock: fare disarida, onizleme kapandi")
+            self.hovered = nil
+            self.pendingShow?.cancel()
+            self.preview.cancel()
+        }
+    }
+
+    private func stopWatch() {
+        watch?.invalidate()
+        watch = nil
     }
 
     private static func runningApp(_ item: AXUIElement) -> NSRunningApplication? {
