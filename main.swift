@@ -217,6 +217,13 @@ enum WindowList {
             }
             // Başlıksız, simge durumunda olmayan, gizli olmayan ekran dışı pencere: yardımcı/çöp pencere
             if !w.onScreen && w.title.isEmpty && !w.minimized && !w.app.isHidden { return nil }
+            // No title anywhere and Accessibility does not show it as an ordinary window, or it is a thin
+            // strip: a helper part of the app, not something to switch to (Chrome's toolbar strip in full
+            // screen and while a debugger banner is up, its bubbles and popups).
+            if w.title.isEmpty && !w.minimized {
+                let sub = w.ax.flatMap { axValue($0, kAXSubroleAttribute) as? String }
+                if !(sub == (kAXStandardWindowSubrole as String) || sub == (kAXDialogSubrole as String)) || w.bounds.height < 120 { return nil }
+            }
             // On no desktop at all: the app put the window away itself, nothing can bring it up from outside,
             // a click on it would do nothing.
             if !w.onScreen && !w.minimized && !w.app.isHidden, SkyLight.spaces(of: w.id)?.isEmpty == true { return nil }
