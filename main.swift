@@ -34,6 +34,17 @@ enum SkyLight {
     static let setFront: SetFrontFn? = sym("_SLPSSetFrontProcessWithOptions")
     static let postEvent: PostEventFn? = sym("SLPSPostEventRecordTo")
     static let psnForPid: PSNFn? = sym("GetProcessForPID")
+    private static let mainConnection: (@convention(c) () -> Int32)? = sym("CGSMainConnectionID")
+    private static let spacesForWindows: (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?)? = sym("CGSCopySpacesForWindows")
+
+    /// The desktops (Spaces, full screen ones included) a window is on; nil when it cannot be asked.
+    /// Minimized windows and the windows of a hidden app still belong to their desktop: a window on none
+    /// was put away by its own app (Chrome keeps such windows) and cannot be shown from outside.
+    static func spaces(of id: CGWindowID) -> [UInt64]? {
+        guard let conn = mainConnection, let copy = spacesForWindows,
+              let list = copy(conn(), 7, [NSNumber(value: id)] as CFArray)?.takeRetainedValue() as? [NSNumber] else { return nil }
+        return list.map { $0.uint64Value }
+    }
 
     static func sym<T>(_ name: String) -> T? {
         let p = handle.flatMap { dlsym($0, name) } ?? dlsym(UnsafeMutableRawPointer(bitPattern: -2), name)
@@ -73,12 +84,32 @@ func axWindows(of pid: pid_t) -> [CGWindowID: AXUIElement] {
     var out: [CGWindowID: AXUIElement] = [:]
     for w in (axValue(app, kAXWindowsAttribute) as? [AXUIElement]) ?? [] {
         var id: CGWindowID = 0
-        if _AXUIElementGetWindow(w, &id) == .success, id != 0 { out[id] = w }
+        if _AXUIElementGetWindow(w, &id) == .success, id != 0 { out[id] = w; AXWindowCache.put(id, w) }
     }
     return out
 }
 
+/// Accessibility elements of windows seen before, by window id. Accessibility only lists the windows of the
+/// current desktop, so a window that has since gone to another desktop or to full screen (a YouTube video
+/// in full screen) is reached through the element remembered from when it was here.
+enum AXWindowCache {
+    private static var map: [CGWindowID: AXUIElement] = [:]
+    private static let lock = NSLock()
+
+    static func put(_ id: CGWindowID, _ el: AXUIElement) { lock.lock(); map[id] = el; lock.unlock() }
+    static func get(_ id: CGWindowID) -> AXUIElement? { lock.lock(); defer { lock.unlock() }; return map[id] }
+    /// Forgets the windows that no longer exist.
+    static func keep(_ ids: Set<CGWindowID>) { lock.lock(); map = map.filter { ids.contains($0.key) }; lock.unlock() }
+}
+
+/// Is the window on the screen right now (on the current desktop, not minimized)?
+func isOnScreen(_ id: CGWindowID) -> Bool {
+    let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], id) as? [[String: Any]])?.first
+    return (info?[kCGWindowIsOnscreen as String] as? Bool) == true
+}
+
 func axRaise(_ el: AXUIElement) {
+    AXUIElementSetMessagingTimeout(el, 0.5)
     if (axValue(el, kAXMinimizedAttribute) as? Bool) == true {
         AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
     }
@@ -89,16 +120,25 @@ func axRaise(_ el: AXUIElement) {
 
 /// Başka masaüstündeki pencerenin AX öğesi kAXWindows listesinde yoktur. AltTab yöntemi: uygulamanın
 /// AX öğe kimlikleri sırayla denenir, aranan pencere kimliğini taşıyan pencere öğesi bulunur.
+/// Browsers number thousands of elements (Chrome's windows sit near 1800), so the scan goes far but stops
+/// after a second, a hung app cannot hold it. Runs off the main thread.
 func axWindowByScan(pid: pid_t, id: CGWindowID) -> AXUIElement? {
+    if let el = AXWindowCache.get(id) { return el }
     var token = Data(count: 20)
     token.replaceSubrange(0..<4, with: withUnsafeBytes(of: pid) { Data($0) })
     token.replaceSubrange(8..<12, with: withUnsafeBytes(of: Int32(0x636f636f)) { Data($0) })
-    for n in UInt64(0)..<1000 {
+    let deadline = Date().addingTimeInterval(1)
+    for n in UInt64(0)..<20000 {
+        if n % 256 == 0, Date() > deadline { break }
         token.replaceSubrange(12..<20, with: withUnsafeBytes(of: n) { Data($0) })
         guard let el = _AXUIElementCreateWithRemoteToken(token as CFData)?.takeRetainedValue() else { continue }
+        AXUIElementSetMessagingTimeout(el, 0.1)
         var wid: CGWindowID = 0
         if _AXUIElementGetWindow(el, &wid) == .success, wid == id,
-           (axValue(el, kAXRoleAttribute) as? String) == (kAXWindowRole as String) { return el }
+           (axValue(el, kAXRoleAttribute) as? String) == (kAXWindowRole as String) {
+            AXWindowCache.put(id, el)
+            return el
+        }
     }
     return nil
 }
@@ -177,8 +217,12 @@ enum WindowList {
             }
             // Başlıksız, simge durumunda olmayan, gizli olmayan ekran dışı pencere: yardımcı/çöp pencere
             if !w.onScreen && w.title.isEmpty && !w.minimized && !w.app.isHidden { return nil }
+            // On no desktop at all: the app put the window away itself, nothing can bring it up from outside,
+            // a click on it would do nothing.
+            if !w.onScreen && !w.minimized && !w.app.isHidden, SkyLight.spaces(of: w.id)?.isEmpty == true { return nil }
             return w
         }
+        AXWindowCache.keep(Set(infos.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }))
 
         // AllTab's own windows (Settings): it is a menu bar app, so they are read from AppKit, not from the
         // window server or Accessibility (asking our own process through Accessibility would wait on ourselves).
@@ -235,7 +279,10 @@ final class FocusTracker {
         AXUIElementSetMessagingTimeout(app, 0.3)
         guard let w = axValue(app, kAXFocusedWindowAttribute) else { return }
         var id: CGWindowID = 0
-        if _AXUIElementGetWindow(w as! AXUIElement, &id) == .success, id != 0 { touch(id) }
+        if _AXUIElementGetWindow(w as! AXUIElement, &id) == .success, id != 0 {
+            touch(id)
+            AXWindowCache.put(id, w as! AXUIElement)
+        }
     }
 
     /// Aktif uygulamanın odak penceresi değişimlerini izler (tek gözlemci, uygulama değişince taşınır).
@@ -250,7 +297,10 @@ final class FocusTracker {
             guard let refcon else { return }
             let me = Unmanaged<FocusTracker>.fromOpaque(refcon).takeUnretainedValue()
             var id: CGWindowID = 0
-            if _AXUIElementGetWindow(element, &id) == .success, id != 0 { me.touch(id) }
+            if _AXUIElementGetWindow(element, &id) == .success, id != 0 {
+                me.touch(id)
+                AXWindowCache.put(id, element)
+            }
         }
         guard AXObserverCreate(pid, cb, &o) == .success, let o else { return }
         let appEl = AXUIElementCreateApplication(pid)
@@ -296,18 +346,34 @@ func activate(_ w: WindowInfo) {
     let gen = activationGeneration
     let app = w.app
     if app.isHidden { app.unhide() }
-    let ax = w.ax ?? axWindows(of: w.pid)[w.id]
+    // The window's own Accessibility element matters for a window on another desktop or in full screen:
+    // bringing only the app forward does not leave the current desktop when the app already has a window
+    // here (Chrome with a YouTube video in full screen), raising the window itself does.
+    let ax = w.ax ?? axWindows(of: w.pid)[w.id] ?? AXWindowCache.get(w.id)
     dlog("activate#\(gen) \(app.localizedName ?? "?") #\(w.id) onScreen=\(w.onScreen) min=\(w.minimized) ax=\(ax != nil) onde=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")")
     SkyLight.bringToFront(pid: w.pid, window: w.id)
     if let ax { axRaise(ax) }
-    // Başka masaüstündeki pencere: masaüstü değiştikten sonra bir kez daha öne al
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+    else if !w.onScreen {
+        // Never seen on this desktop: find its element in the background, then raise it
+        DispatchQueue.global(qos: .userInteractive).async {
+            let el = axWindowByScan(pid: w.pid, id: w.id)
+            DispatchQueue.main.async {
+                dlog("activate#\(gen) tarama: bulundu=\(el != nil)")
+                guard gen == activationGeneration, let el else { return }
+                SkyLight.bringToFront(pid: w.pid, window: w.id)
+                axRaise(el)
+            }
+        }
+    }
+    // Başka masaüstündeki pencere: masaüstü değiştikten sonra hala görünmüyorsa bir kez daha öne al
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
         guard gen == activationGeneration else { return }
         let front = NSWorkspace.shared.frontmostApplication
-        dlog("activate#\(gen) +0.4s onde=\(front?.localizedName ?? "?")")
-        if front?.processIdentifier != w.pid {
+        let shown = isOnScreen(w.id)
+        dlog("activate#\(gen) +0.45s onde=\(front?.localizedName ?? "?") ekranda=\(shown)")
+        if front?.processIdentifier != w.pid || !shown {
             SkyLight.bringToFront(pid: w.pid, window: w.id)
-            if let el = axWindows(of: w.pid)[w.id] { axRaise(el) }
+            if let el = axWindows(of: w.pid)[w.id] ?? AXWindowCache.get(w.id) { axRaise(el) }
         }
     }
 }
